@@ -1,0 +1,250 @@
+name: Build Docker & Sign (cryptotensors-vllm, amd64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      vllm_tag:
+        description: "vLLM upstream image tag (e.g., v0.9.2; leave empty to use Dockerfile ARG default value, i.e. latest)"
+        required: false
+        type: string
+      cuda_suffix:
+        description: "CUDA suffix of framework_version"
+        required: false
+        default: "CUDA"
+        type: string
+      container_name:
+        description: "Container name for signing/scanning"
+        required: false
+        default: "vllm-qwen3"
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  ARCH: amd64
+  DOCKERFILE: Dockerfile
+  IMAGE_NAME: cryptotensors-vllm
+
+jobs:
+  build-sign-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free Disk Space (fast)
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          dotnet: true
+          large-packages: true
+          docker-images: false
+
+      - name: Install jq (for parsing GitHub API)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends jq ca-certificates
+
+      - name: Download wheels (safetensors + cryptotensors linux x86_64)
+        id: dl_wheels
+        env:
+          GH_OWNER: koalavault
+          GH_REPO: cryptotensors
+          GH_TOKEN: ${{ secrets.KOALAVAULT_TOKEN }}
+        run: |
+          set -euo pipefail
+          auth=(-H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json")
+      
+          echo "[info] GET releases list" >&2
+          JSON=$(curl -fsSL "${auth[@]}" "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/releases?per_page=100")
+      
+          ASSETS=$(printf '%s' "$JSON" | jq -c '
+            [ .[] | {tag:.tag_name, draft, prerelease, assets:(.assets // [])} ]
+            | map(.assets[]? as $a | {tag, draft, prerelease} + {id:$a.id, name:$a.name, created_at:$a.created_at})
+          ')
+          [[ "$ASSETS" != "[]" && -n "$ASSETS" ]] || { echo "::error::No assets visible."; exit 1; }
+      
+          # safetensors: safetensors-*.whl
+          SAFE_LINE=$(printf '%s' "$ASSETS" | jq -r '
+            .[] 
+            | select(.name|test("^safetensors-.*\\.whl$"; "i"))
+            | {name, id, created_at, 
+                v: ((.name | capture("^safetensors-(?<v>[0-9][0-9\\.]*)")).v // "")}
+            | [.name, .v, (.id|tostring), .created_at] | @tsv
+          ' | sort -t$'\t' -k2,2V -k4,4 | tail -n1)
+          [[ -n "${SAFE_LINE}" ]] || { echo "::error::No safetensors wheel found."; exit 1; }
+          SAFE_NAME=$(cut -f1 <<<"$SAFE_LINE"); SAFE_ID=$(cut -f3 <<<"$SAFE_LINE")
+      
+          # cryptotensors: cryptotensors + linux + x86_64 + .whl
+          CRYPTO_LINE=$(printf '%s' "$ASSETS" | jq -r '
+            .[] 
+            | select(.name|test("cryptotensors"; "i")) 
+            | select(.name|test("linux"; "i")) 
+            | select(.name|test("x86_64"; "i")) 
+            | select(.name|test("\\.whl$"; "i"))
+            | {name, id, created_at,
+                v: ((.name | capture("^cryptotensors-(?<v>[0-9][0-9\\.]*)")).v // "")}
+            | [.name, .v, (.id|tostring), .created_at] | @tsv
+          ' | sort -t$'\t' -k2,2V -k4,4 | tail -n1)
+          [[ -n "${CRYPTO_LINE}" ]] || { echo "::error::No cryptotensors linux x86_64 wheel found."; exit 1; }
+          CRYPTO_NAME=$(cut -f1 <<<"$CRYPTO_LINE"); CRYPTO_ID=$(cut -f3 <<<"$CRYPTO_LINE")
+      
+          download_asset () {
+            local ID="${1:?missing asset id}"
+            local OUT="${2:?missing output filename}"
+            local URL="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/releases/assets/${ID}"
+            echo "[info] Downloading ${OUT} via ${URL}" >&2
+            curl -fsSLL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/octet-stream" \
+              -o "${OUT}" \
+              "${URL}"
+          }
+      
+          # Download with original file names (canonical wheel names)
+          download_asset "${SAFE_ID}"   "${SAFE_NAME}"
+          download_asset "${CRYPTO_ID}" "${CRYPTO_NAME}"
+      
+          # Copy to fixed names for easy reference; original names remain for pip
+          cp -f "$SAFE_NAME" safetensors.whl
+          cp -f "$CRYPTO_NAME" cryptotensors.whl
+      
+          # Expose both "fixed-name paths" and "original names" as outputs
+          echo "safetensors_path=$PWD/safetensors.whl"     >> "$GITHUB_OUTPUT"
+          echo "cryptotensors_path=$PWD/cryptotensors.whl" >> "$GITHUB_OUTPUT"
+          echo "safe_wheel=$SAFE_NAME"   >> "$GITHUB_OUTPUT"
+          echo "crypto_wheel=$CRYPTO_NAME" >> "$GITHUB_OUTPUT"
+      
+          sha256sum "$SAFE_NAME" "$CRYPTO_NAME" || true
+
+      - name: Download hash-builder by asset id (private-friendly)
+        id: dl_hash_builder
+        env:
+          GH_OWNER: koalavault
+          GH_REPO: cryptotensors
+          GH_TOKEN: ${{ secrets.KOALAVAULT_TOKEN }}   # your PAT
+          ASSET_PREFIX: hash-builder-linux-amd64
+          RELEASE_TAG: hash-builder                    # since your tag is called hash-builder, lock to it
+        run: |
+          set -euo pipefail
+      
+          # 1) Get release exactly by tag
+          REL_API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/releases/tags/${RELEASE_TAG}"
+          REL_JSON=$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "$REL_API")
+      
+          # 2) Find the asset in this release and extract asset id
+          ASSET_ID=$(echo "$REL_JSON" | jq -r --arg p "$ASSET_PREFIX" '
+            .assets[] | select(.name | startswith($p)) | .id
+          ' | head -n1)
+      
+          if [[ -z "${ASSET_ID}" || "${ASSET_ID}" == "null" ]]; then
+            echo "::error::Cannot find asset starting with '${ASSET_PREFIX}' in tag=${RELEASE_TAG}"
+            echo "$REL_JSON" | jq '{tag:.tag_name, draft, prerelease, assets:[.assets[]?|{name, id, size, created_at}] }'
+            exit 1
+          fi
+      
+          # 3) Use official assets/{id} download endpoint (works for private/cross-repo)
+          DL_API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/releases/assets/${ASSET_ID}"
+          echo "[info] download asset_id=${ASSET_ID} via $DL_API"
+          curl -fsSLL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/octet-stream" \
+            -o hash-builder \
+            "$DL_API"
+      
+          chmod +x hash-builder
+          echo "path=$PWD/hash-builder" >> "$GITHUB_OUTPUT"
+          sha256sum hash-builder || true
+
+      - name: Determine vLLM tag & write version.json
+        id: meta
+        run: |
+          set -euo pipefail
+          VTAG="${{ github.event.inputs.vllm_tag || '' }}"
+          if [[ -z "$VTAG" ]]; then
+            VTAG="$(awk -F= '/^ARG[[:space:]]+VLLM_TAG=/{print $2; exit}' "${{ env.DOCKERFILE }}")"
+          fi
+          VTAG="${VTAG:-latest}"
+          echo "vllm_tag=$VTAG" >> "$GITHUB_OUTPUT"
+
+          FRAMEWORK_VERSION="vllm-${VTAG}-${{ env.ARCH }}-${{ github.event.inputs.cuda_suffix }}"
+          export FRAMEWORK_VERSION
+
+          python3 - <<'PY'
+          import json, os
+          p = "version.json"
+          data = {}
+          if os.path.exists(p):
+              try:
+                  with open(p, "r", encoding="utf-8") as f:
+                      data = json.load(f)
+              except Exception:
+                  data = {}
+          data["framework_version"] = os.environ.get("FRAMEWORK_VERSION", "")
+          with open(p, "w", encoding="utf-8") as f:
+              json.dump(data, f, ensure_ascii=False, indent=2)
+          print("== version.json ==")
+          print(json.dumps(data, ensure_ascii=False, indent=2))
+          PY
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build image (push to GHCR)
+        id: build
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.meta.outputs.vllm_tag }}"
+          OWNER_LC="${GITHUB_REPOSITORY_OWNER,,}"
+          IMAGE_REF="ghcr.io/${OWNER_LC}/${{ env.IMAGE_NAME }}:${TAG}"
+          echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
+
+          docker buildx build \
+            --platform "linux/${{ env.ARCH }}" \
+            --file "${{ env.DOCKERFILE }}" \
+            --build-arg "VLLM_TAG=${TAG}" \
+            --tag "${IMAGE_REF}" \
+            --provenance=false \
+            --push \
+            .
+
+      - name: Drop build cache (free peak space)
+        run: |
+          set -euo pipefail
+          docker buildx du || true
+          docker buildx prune -af
+          docker image prune -af || true
+          df -h || true
+
+      - name: Pull image for local run
+        id: pull
+        run: |
+          set -euo pipefail
+          docker pull "${{ steps.build.outputs.image_ref }}"
+
+      - name: Run container (sleep)
+        id: run
+        run: |
+          set -euo pipefail
+          CNAME="${{ github.event.inputs.container_name }}"
+          docker rm -f "$CNAME" >/dev/null 2>&1 || true
+          docker run -d --name "$CNAME" --entrypoint /bin/sh "${{ steps.build.outputs.image_ref }}" -lc "sleep infinity"
+          echo "container_name=$CNAME" >> "$GITHUB_OUTPUT"
+
+      - name: Run hash-builder (scan/sign)
+        run: |
+          set -euo pipefail
+          CONTAINER="${{ steps.run.outputs.container_name }}"
+          echo "[debug] will scan container = $CONTAINER"
+          CONTAINER="$CONTAINER" "${{ steps.dl_hash_builder.outputs.path }}" | tee signature.txt
