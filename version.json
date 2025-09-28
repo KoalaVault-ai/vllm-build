@@ -1,0 +1,6 @@
+{
+  "framework_version": "",
+  "framework_type": "vllm",
+  "git_commit": "abc123def456",
+  "build_date": "2024-01-15T10:30:00Z"
+}
