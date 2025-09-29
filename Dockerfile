@@ -35,9 +35,6 @@ RUN ${PY} -m pip uninstall -y safetensors || true && \
     rm -f /tmp/*.whl
 
 
-
-
-
 ########## Inject client_init into vllm source code ########## 
 # Inject patch snippet and directly modify vLLM’s weight_utils.py inside the container
 COPY patch_weight_utils.py /tmp/patch_weight_utils.py

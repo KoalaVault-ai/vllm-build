@@ -22,12 +22,12 @@ def resolve_vllm_module() -> str:
     return CANDIDATES[0]
 
 def split_args(argv):
-    """Split --crypto_* arguments from vllm arguments"""
+    """Split --koalavault-* arguments from vllm arguments"""
     client, vllm = [], []
     i = 0
     while i < len(argv):
         tok = argv[i]
-        if tok.startswith("--crypto_") or tok.startswith("--crypto-"):
+        if tok.startswith("--koalavault-"):
             client.append(tok)
             # If it's in the form --xxx value, consume both tokens
             if "=" not in tok and i + 1 < len(argv) and not argv[i + 1].startswith("-"):
@@ -89,7 +89,6 @@ def find_forbidden(vllm_args):
     return hits
 
 def main():
-    print("[boot] Using patched boot script v2025-09-28", flush=True)
     argv = sys.argv[1:]
     crypto_args, vllm_args = split_args(argv)
 
@@ -97,69 +96,66 @@ def main():
     forbidden = find_forbidden(vllm_args)
     if forbidden:
         print(
-            "[boot] Unsupported option(s) detected and blocked:\n  - "
+            "[koalavault] Unsupported option(s) detected and blocked:\n  - "
             + "\n  - ".join(forbidden)
-            + "\n[boot] This container **does not support trust-remote-code**. "
+            + "\n[koalavault] This container **does not support trust-remote-code**. "
               "Please remove these options/env and retry.",
             flush=True,
         )
         sys.exit(7)
 
-    # ---- ENV takes priority, CLI as fallback ----
-    base_url = os.environ.get("BASE_URL")
-    api_key  = os.environ.get("API_KEY") or get_arg(crypto_args, "crypto_api_key")
+    # ---- Get API key from CLI only ----
+    api_key = get_arg(crypto_args, "koalavault-api-key")
 
-    model_owner = get_arg(crypto_args, "crypto_model_owner")
-    model_name  = get_arg(crypto_args, "crypto_model_name")
+    # Parse combined model parameter in format "owner/model_name"
+    model_combined = get_arg(crypto_args, "koalavault-model")
+    if model_combined:
+        if "/" in model_combined:
+            model_owner, model_name = model_combined.split("/", 1)
+        else:
+            print(f"[koalavault] Invalid model format: {model_combined}. Expected format: owner/model_name", flush=True)
+            sys.exit(2)
+    else:
+        model_owner = None
+        model_name = None
     model_path  = get_arg(vllm_args, "model")
-
-    # Debug (do not print key in plaintext)
-    print("[boot] Resolved config:", {
-        "api_key_provided": bool(api_key),
-        "model_owner": model_owner,
-        "model_name": model_name,
-        "base_url": base_url,
-        "model_path": model_path,
-    }, flush=True)
 
     # Check required parameters
     missing = []
-    if not api_key:     missing.append("API_KEY or --crypto_api_key")
-    if not model_owner: missing.append("--crypto_model_owner")
-    if not model_name:  missing.append("--crypto_model_name")
+    if not model_owner or not model_name: missing.append("--koalavault-model <owner/model_name>")
     if not model_path:  missing.append("--model")
-    if not base_url:    missing.append("BASE_URL")
     if missing:
-        print(f"[boot] Missing required params: {', '.join(missing)}", flush=True)
+        print(f"[koalavault] Missing required params: {', '.join(missing)}", flush=True)
         sys.exit(2)
 
-    # Write back environment variables
-    os.environ["CRYPTO_API_KEY"]      = str(api_key)
-    os.environ["CRYPTO_MODEL_OWNER"]  = str(model_owner)
-    os.environ["CRYPTO_MODEL_NAME"]   = str(model_name)
-    os.environ["CRYPTO_MODEL_PATH"]   = str(model_path)
-    os.environ["CRYPTO_BASE_URL"]     = str(base_url)
-    os.environ["MODELVAULT_BASE_URL"] = str(base_url)
+    # Write back environment variables (using weird names to avoid conflicts)
+    if api_key:
+        os.environ["__KV_INTERNAL_API_KEY__"] = str(api_key)
+    os.environ["__KV_INTERNAL_MODEL_OWNER__"]  = str(model_owner)
+    os.environ["__KV_INTERNAL_MODEL_NAME__"]   = str(model_name)
+    os.environ["__KV_INTERNAL_MODEL_PATH__"]   = str(model_path)
 
-    # client init
-    try:
-        from cryptotensors import client_init
-        client_init(
-            api_key=api_key,
-            model_owner=model_owner,
-            model_name=model_name,
-            model_path=model_path,
-        )
-        print("[boot] Client initialized.", flush=True)
-    except Exception as e:
-        print(f"[boot] client_init failed: {e}", flush=True)
-        sys.exit(3)
+    # client init - only if API key is provided
+    if api_key:
+        try:
+            from cryptotensors import client_init
+            client_init(
+                api_key=api_key,
+                model_owner=model_owner,
+                model_name=model_name,
+                model_path=model_path,
+            )
+            print("[koalavault] Client initialized.", flush=True)
+        except Exception as e:
+            print(f"[koalavault] Client initialization failed: {e}", flush=True)
+            sys.exit(3)
+    else:
+        print("[koalavault] Skipping client initialization.", flush=True)
 
     # ---- Start vLLM: force execution with python -m ----
     import runpy
 
     mod = resolve_vllm_module()
-    print(f"[boot] Executing module via runpy: {mod}", flush=True)
 
     sys.argv = [mod] + vllm_args  # Simulate python -m <mod> <args...>
     try:
@@ -168,7 +164,7 @@ def main():
         # Let uvicorn / argparse control exit code normally
         raise
     except Exception as e:
-        print(f"[boot] run_module({mod}) failed: {e}", flush=True)
+        print(f"[koalavault] Module execution failed: {e}", flush=True)
         sys.exit(6)
 
 
