@@ -286,6 +286,38 @@ jobs:
           else
             echo "::warning::register payload.json not found"
           fi
+          
+      - name: Run hash-builder (scan/sign)
+        id: hash_builder
+        run: |
+          set -euo pipefail
+          CONTAINER="${{ steps.run.outputs.container_name }}"
+          HB="${{ steps.dl_hash_builder.outputs.path }}"
+          HB="$(realpath -P "$HB")"
+          HB_DIR="$(dirname "$HB")"
+          HB_PARENT="$(dirname "$HB_DIR")"
+
+          echo "[debug] run hash-builder: $HB (container=$CONTAINER)"
+          CONTAINER="$CONTAINER" "$HB" | tee baseline_hash.txt
+
+          if [[ -f "./register_payload.json" ]]; then
+            PAYLOAD="./register_payload.json"
+          elif [[ -f "$HB_DIR/register_payload.json" ]]; then
+            PAYLOAD="$HB_DIR/register_payload.json"
+          elif [[ -f "$HB_PARENT/register_payload.json" ]]; then
+            PAYLOAD="$HB_PARENT/register_payload.json"
+          else
+            echo "::error::register_payload.json not found in ./ or $HB_DIR or $HB_PARENT"
+            exit 1
+          fi
+
+          MEAS_HASH="$(jq -r '.measurement_hash // .root_sha256 // empty' "$PAYLOAD")"
+          [[ -z "$MEAS_HASH" ]] && { echo "::error::measurement_hash missing in $PAYLOAD"; exit 1; }
+
+          echo "measurement_hash=$MEAS_HASH" >> "$GITHUB_OUTPUT"
+          echo "[info] Extracted measurement_hash: $MEAS_HASH from $PAYLOAD"
+
+
 
       - name: Print baseline information
         run: |
