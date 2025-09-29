@@ -316,7 +316,7 @@ jobs:
           fi
           
           # Get root_sha256 from hash_builder step output
-          ROOT_SHA256="${{ steps.hash_builder.outputs.root_sha256 }}"
+          ROOT_SHA256="${{ steps.hash_builder.outputs.measurement_hash }}"
           
           echo "[info] Framework Version: $FRAMEWORK_VERSION"
           echo "[info] Baseline Hash: $ROOT_SHA256"
@@ -334,7 +334,7 @@ jobs:
           echo "[info] Registering baseline to API..."
           
           # Use root_sha256 from hash_builder step output as baseline_hash
-          BASELINE_HASH="${{ steps.hash_builder.outputs.root_sha256 }}"
+          BASELINE_HASH="${{ steps.hash_builder.outputs.measurement_hash }}"
           if [[ -z "$BASELINE_HASH" || "$BASELINE_HASH" == "null" ]]; then
             echo "::error::Could not get root_sha256 from hash_builder step"
             exit 1
