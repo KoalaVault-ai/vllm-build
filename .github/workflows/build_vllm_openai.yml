@@ -22,11 +22,7 @@ on:
         required: false
         default: false
         type: boolean
-      push_to_dockerhub:
-        description: "Push image to Docker Hub (true/false)"
-        required: false
-        default: false
-        type: boolean
+
 
 permissions:
   contents: read
@@ -241,28 +237,16 @@ jobs:
           IMAGE_REF="${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${TAG}"
           echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
 
-          # Build with or without push based on input
-          if [[ "${{ github.event.inputs.push_to_dockerhub }}" == "true" ]]; then
-            echo "[info] Building and pushing image to Docker Hub"
-            docker buildx build \
-              --platform "${{ env.PLATFORM_OS }}/${{ env.ARCH }}" \
-              --file "${{ env.DOCKERFILE }}" \
-              --build-arg "VLLM_TAG=${TAG}" \
-              --tag "${IMAGE_REF}" \
-              --provenance=false \
-              --push \
-              .
-          else
-            echo "[info] Building image locally (not pushing to Docker Hub)"
-            docker buildx build \
-              --platform "${{ env.PLATFORM_OS }}/${{ env.ARCH }}" \
-              --file "${{ env.DOCKERFILE }}" \
-              --build-arg "VLLM_TAG=${TAG}" \
-              --tag "${IMAGE_REF}" \
-              --provenance=false \
-              --load \
-              .
-          fi
+          # Build with push based on input
+          echo "[info] Building and pushing image to Docker Hub"
+          docker buildx build \
+            --platform "${{ env.PLATFORM_OS }}/${{ env.ARCH }}" \
+            --file "${{ env.DOCKERFILE }}" \
+            --build-arg "VLLM_TAG=${TAG}" \
+            --tag "${IMAGE_REF}" \
+            --provenance=false \
+            --push \
+            .
 
       - name: Drop build cache (free peak space)
         run: |
