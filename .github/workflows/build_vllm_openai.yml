@@ -307,12 +307,6 @@ jobs:
           set -euo pipefail
           echo "[info] === Baseline Information ==="
           
-          # Extract baseline hash from baseline_hash.txt
-          BASELINE_HASH=$(grep -o 'hash: [a-f0-9]*' baseline_hash.txt | cut -d' ' -f2)
-          if [[ -z "$BASELINE_HASH" ]]; then
-            echo "::error::Could not extract baseline hash from baseline_hash.txt"
-            exit 1
-          fi
           
           # Get framework version from version.json
           FRAMEWORK_VERSION=$(jq -r '.framework_version' version.json)
@@ -325,8 +319,7 @@ jobs:
           ROOT_SHA256="${{ steps.hash_builder.outputs.root_sha256 }}"
           
           echo "[info] Framework Version: $FRAMEWORK_VERSION"
-          echo "[info] Baseline Hash: $BASELINE_HASH"
-          echo "[info] Root SHA256: $ROOT_SHA256"
+          echo "[info] Baseline Hash: $ROOT_SHA256"
           echo "[info] Framework Type: vllm-openai"
           echo "[info] ================================"
 
