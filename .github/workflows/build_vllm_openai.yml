@@ -354,7 +354,7 @@ jobs:
           BASELINE_DATA=$(cat <<EOF
           {
             "framework_version": "$FRAMEWORK_VERSION",
-            "framework_type": "vllm-openai",
+            "framework_type": "vllm",
             "baseline_hash": "$BASELINE_HASH",
             "description": "vLLM framework baseline version $FRAMEWORK_VERSION",
             "tag": "stable"
