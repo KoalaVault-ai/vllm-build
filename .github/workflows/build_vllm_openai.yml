@@ -230,7 +230,7 @@ jobs:
         if: ${{ github.event.inputs.push_to_dockerhub == 'true' }}
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build image
@@ -238,7 +238,7 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ steps.meta.outputs.vllm_tag }}"
-          IMAGE_REF="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${TAG}"
+          IMAGE_REF="${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${TAG}"
           echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
 
           # Build with or without push based on input
