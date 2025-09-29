@@ -1,4 +1,4 @@
-name: Build Docker & Sign (cryptotensors-vllm, amd64)
+name: Build Docker & Sign (cryptotensors-vllm, linux x64)
 
 on:
   workflow_dispatch:
@@ -23,9 +23,10 @@ permissions:
   packages: write
 
 env:
+  PLATFORM_OS: linux
   ARCH: amd64
   DOCKERFILE: Dockerfile
-  IMAGE_NAME: cryptotensors-vllm
+  IMAGE_NAME: cryptotensors-vllm-linux-x64
 
 jobs:
   build-sign-push:
@@ -172,7 +173,7 @@ jobs:
           VTAG="${VTAG:-latest}"
           echo "vllm_tag=$VTAG" >> "$GITHUB_OUTPUT"
 
-          FRAMEWORK_VERSION="vllm-${VTAG}-${{ env.ARCH }}-${{ github.event.inputs.cuda_suffix }}"
+          FRAMEWORK_VERSION="vllm-${VTAG}-${{ env.PLATFORM_OS }}-${{ env.ARCH }}-${{ github.event.inputs.cuda_suffix }}"
           export FRAMEWORK_VERSION
 
           python3 - <<'PY'
