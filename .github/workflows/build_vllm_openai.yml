@@ -370,9 +370,26 @@ jobs:
           
           echo "[info] Registering baseline: $FRAMEWORK_VERSION with hash: $BASELINE_HASH"
           
-          # Register baseline
+          # First, get JWT token using API key
+          echo "[info] Getting admin JWT token..."
+          TOKEN_RESPONSE=$(curl -s -X POST "${{ vars.KOALAVAULT_API_BASE_URL }}/api/admin/api-key-login" \
+            -H "Content-Type: application/json" \
+            -d "{\"api_key\": \"${{ secrets.KOALAVAULT_ADMIN_API_KEY }}\"}")
+          
+          # Extract JWT token
+          JWT_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.data.access_token')
+          
+          if [ "$JWT_TOKEN" = "null" ] || [ -z "$JWT_TOKEN" ]; then
+            echo "::error::Failed to get JWT token"
+            echo "$TOKEN_RESPONSE"
+            exit 1
+          fi
+          
+          echo "[info] JWT token obtained successfully"
+          
+          # Register baseline using JWT token
           RESPONSE=$(curl -s -X POST "${{ vars.KOALAVAULT_API_BASE_URL }}/api/admin/framework/baselines" \
-            -H "Authorization: Bearer ${{ secrets.KOALAVAULT_ADMIN_API_KEY }}" \
+            -H "Authorization: Bearer $JWT_TOKEN" \
             -H "Content-Type: application/json" \
             -d "$BASELINE_DATA")
           
