@@ -22,11 +22,7 @@ on:
         required: false
         default: false
         type: boolean
-      push_to_dockerhub:
-        description: "Push image to Docker Hub (true/false)"
-        required: false
-        default: false
-        type: boolean
+
 
 permissions:
   contents: read
@@ -227,10 +223,9 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Login Docker Hub
-        if: ${{ github.event.inputs.push_to_dockerhub == 'true' }}
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build image
@@ -238,31 +233,19 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ steps.meta.outputs.vllm_tag }}"
-          IMAGE_REF="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${TAG}"
+          IMAGE_REF="${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${TAG}"
           echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
 
-          # Build with or without push based on input
-          if [[ "${{ github.event.inputs.push_to_dockerhub }}" == "true" ]]; then
-            echo "[info] Building and pushing image to Docker Hub"
-            docker buildx build \
-              --platform "${{ env.PLATFORM_OS }}/${{ env.ARCH }}" \
-              --file "${{ env.DOCKERFILE }}" \
-              --build-arg "VLLM_TAG=${TAG}" \
-              --tag "${IMAGE_REF}" \
-              --provenance=false \
-              --push \
-              .
-          else
-            echo "[info] Building image locally (not pushing to Docker Hub)"
-            docker buildx build \
-              --platform "${{ env.PLATFORM_OS }}/${{ env.ARCH }}" \
-              --file "${{ env.DOCKERFILE }}" \
-              --build-arg "VLLM_TAG=${TAG}" \
-              --tag "${IMAGE_REF}" \
-              --provenance=false \
-              --load \
-              .
-          fi
+          # Build with push based on input
+          echo "[info] Building and pushing image to Docker Hub"
+          docker buildx build \
+            --platform "${{ env.PLATFORM_OS }}/${{ env.ARCH }}" \
+            --file "${{ env.DOCKERFILE }}" \
+            --build-arg "VLLM_TAG=${TAG}" \
+            --tag "${IMAGE_REF}" \
+            --provenance=false \
+            --push \
+            .
 
       - name: Drop build cache (free peak space)
         run: |
@@ -286,35 +269,44 @@ jobs:
           docker rm -f "$CNAME" >/dev/null 2>&1 || true
           docker run -d --name "$CNAME" --entrypoint /bin/sh "${{ steps.build.outputs.image_ref }}" -lc "sleep infinity"
           echo "container_name=$CNAME" >> "$GITHUB_OUTPUT"
-
+          
       - name: Run hash-builder (scan/sign)
         id: hash_builder
         run: |
           set -euo pipefail
           CONTAINER="${{ steps.run.outputs.container_name }}"
-          echo "[debug] will scan container = $CONTAINER"
-          CONTAINER="$CONTAINER" "${{ steps.dl_hash_builder.outputs.path }}" | tee baseline_hash.txt
-          
-          # Extract root_sha256 from register payload.json
-          if [[ -f "register payload.json" ]]; then
-            ROOT_SHA256=$(jq -r '.root_sha256' "register payload.json")
-            echo "root_sha256=$ROOT_SHA256" >> "$GITHUB_OUTPUT"
-            echo "[info] Extracted root_sha256: $ROOT_SHA256"
+          HB="${{ steps.dl_hash_builder.outputs.path }}"
+          HB="$(realpath -P "$HB")"
+          HB_DIR="$(dirname "$HB")"
+          HB_PARENT="$(dirname "$HB_DIR")"
+
+          echo "[debug] run hash-builder: $HB (container=$CONTAINER)"
+          CONTAINER="$CONTAINER" "$HB" | tee baseline_hash.txt
+
+          if [[ -f "./register_payload.json" ]]; then
+            PAYLOAD="./register_payload.json"
+          elif [[ -f "$HB_DIR/register_payload.json" ]]; then
+            PAYLOAD="$HB_DIR/register_payload.json"
+          elif [[ -f "$HB_PARENT/register_payload.json" ]]; then
+            PAYLOAD="$HB_PARENT/register_payload.json"
           else
-            echo "::warning::register payload.json not found"
+            echo "::error::register_payload.json not found in ./ or $HB_DIR or $HB_PARENT"
+            exit 1
           fi
+
+          MEAS_HASH="$(jq -r '.measurement_hash // .root_sha256 // empty' "$PAYLOAD")"
+          [[ -z "$MEAS_HASH" ]] && { echo "::error::measurement_hash missing in $PAYLOAD"; exit 1; }
+
+          echo "measurement_hash=$MEAS_HASH" >> "$GITHUB_OUTPUT"
+          echo "[info] Extracted measurement_hash: $MEAS_HASH from $PAYLOAD"
+
+
 
       - name: Print baseline information
         run: |
           set -euo pipefail
           echo "[info] === Baseline Information ==="
           
-          # Extract baseline hash from baseline_hash.txt
-          BASELINE_HASH=$(grep -o 'hash: [a-f0-9]*' baseline_hash.txt | cut -d' ' -f2)
-          if [[ -z "$BASELINE_HASH" ]]; then
-            echo "::error::Could not extract baseline hash from baseline_hash.txt"
-            exit 1
-          fi
           
           # Get framework version from version.json
           FRAMEWORK_VERSION=$(jq -r '.framework_version' version.json)
@@ -324,11 +316,10 @@ jobs:
           fi
           
           # Get root_sha256 from hash_builder step output
-          ROOT_SHA256="${{ steps.hash_builder.outputs.root_sha256 }}"
+          ROOT_SHA256="${{ steps.hash_builder.outputs.measurement_hash }}"
           
           echo "[info] Framework Version: $FRAMEWORK_VERSION"
-          echo "[info] Baseline Hash: $BASELINE_HASH"
-          echo "[info] Root SHA256: $ROOT_SHA256"
+          echo "[info] Baseline Hash: $ROOT_SHA256"
           echo "[info] Framework Type: vllm-openai"
           echo "[info] ================================"
 
@@ -343,7 +334,7 @@ jobs:
           echo "[info] Registering baseline to API..."
           
           # Use root_sha256 from hash_builder step output as baseline_hash
-          BASELINE_HASH="${{ steps.hash_builder.outputs.root_sha256 }}"
+          BASELINE_HASH="${{ steps.hash_builder.outputs.measurement_hash }}"
           if [[ -z "$BASELINE_HASH" || "$BASELINE_HASH" == "null" ]]; then
             echo "::error::Could not get root_sha256 from hash_builder step"
             exit 1
