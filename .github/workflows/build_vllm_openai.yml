@@ -22,8 +22,9 @@ on:
         required: false
         default: false
         type: boolean
-
-
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
 permissions:
   contents: read
 
@@ -171,11 +172,16 @@ jobs:
         id: meta
         run: |
           set -euo pipefail
-          VTAG="${{ github.event.inputs.vllm_tag || '' }}"
-          if [[ -z "$VTAG" ]]; then
-            VTAG="$(awk -F= '/^ARG[[:space:]]+VLLM_TAG=/{print $2; exit}' "${{ env.DOCKERFILE }}")"
+          # For push tag trigger, use the tag as vllm_tag; for workflow_dispatch, use input or default
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            VTAG="${{ github.ref_name }}"
+          else
+            VTAG="${{ github.event.inputs.vllm_tag || '' }}"
+            if [[ -z "$VTAG" ]]; then
+              VTAG="$(awk -F= '/^ARG[[:space:]]+VLLM_TAG=/{print $2; exit}' "${{ env.DOCKERFILE }}")"
+            fi
+            VTAG="${VTAG:-latest}"
           fi
-          VTAG="${VTAG:-latest}"
           echo "vllm_tag=$VTAG" >> "$GITHUB_OUTPUT"
 
           # Get GitHub commit information
@@ -194,7 +200,13 @@ jobs:
           export GIT_COMMIT
 
           # Build framework version with commit info (prefix with 'KV' for KoalaVault)
-          FRAMEWORK_VERSION="vllm-${VTAG}-${{ env.PLATFORM_OS }}-${{ env.ARCH }}-${{ github.event.inputs.cuda_suffix }}-KV${GIT_COMMIT:0:8}"
+          # For push tag trigger, use default CUDA suffix; for workflow_dispatch, use input or default
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            CUDA_SUFFIX="CUDA"
+          else
+            CUDA_SUFFIX="${{ github.event.inputs.cuda_suffix || 'CUDA' }}"
+          fi
+          FRAMEWORK_VERSION="vllm-${VTAG}-${{ env.PLATFORM_OS }}-${{ env.ARCH }}-${CUDA_SUFFIX}-KV${GIT_COMMIT:0:8}"
           export FRAMEWORK_VERSION
 
           # Get current build date in ISO format
@@ -268,7 +280,12 @@ jobs:
         id: run
         run: |
           set -euo pipefail
-          CNAME="${{ github.event.inputs.container_name }}"
+          # For push tag trigger, use default container name; for workflow_dispatch, use input or default
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            CNAME="vllm-openai"
+          else
+            CNAME="${{ github.event.inputs.container_name || 'vllm-openai' }}"
+          fi
           docker rm -f "$CNAME" >/dev/null 2>&1 || true
           docker run -d --name "$CNAME" --entrypoint /bin/sh "${{ steps.build.outputs.image_ref }}" -lc "sleep infinity"
           echo "container_name=$CNAME" >> "$GITHUB_OUTPUT"
@@ -327,7 +344,7 @@ jobs:
           echo "[info] ================================"
 
       - name: Register baseline to API
-        if: ${{ github.event.inputs.register_baseline == 'true' && vars.KOALAVAULT_API_BASE_URL != '' }}
+        if: ${{ (github.event_name == 'push' && false) || (github.event_name == 'workflow_dispatch' && github.event.inputs.register_baseline == 'true') }} && vars.KOALAVAULT_API_BASE_URL != ''
         run: |
           set -euo pipefail
           if [[ -z "${{ secrets.KOALAVAULT_ADMIN_API_KEY }}" ]]; then
