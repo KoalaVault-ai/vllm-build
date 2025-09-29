@@ -234,15 +234,18 @@ jobs:
           set -euo pipefail
           TAG="${{ steps.meta.outputs.vllm_tag }}"
           IMAGE_REF="${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${TAG}"
+          IMAGE_REF_LATEST="${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest"
           echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
+          echo "image_ref_latest=${IMAGE_REF_LATEST}" >> "$GITHUB_OUTPUT"
 
           # Build with push based on input
-          echo "[info] Building and pushing image to Docker Hub"
+          echo "[info] Building and pushing image to Docker Hub with tags: ${TAG} and latest"
           docker buildx build \
             --platform "${{ env.PLATFORM_OS }}/${{ env.ARCH }}" \
             --file "${{ env.DOCKERFILE }}" \
             --build-arg "VLLM_TAG=${TAG}" \
             --tag "${IMAGE_REF}" \
+            --tag "${IMAGE_REF_LATEST}" \
             --provenance=false \
             --push \
             .
