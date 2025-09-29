@@ -1,4 +1,4 @@
-name: Build vLLM Container and Sign
+name: Build vLLM Container and Push to Docker Hub
 
 on:
   workflow_dispatch:
@@ -288,11 +288,21 @@ jobs:
           echo "container_name=$CNAME" >> "$GITHUB_OUTPUT"
 
       - name: Run hash-builder (scan/sign)
+        id: hash_builder
         run: |
           set -euo pipefail
           CONTAINER="${{ steps.run.outputs.container_name }}"
           echo "[debug] will scan container = $CONTAINER"
           CONTAINER="$CONTAINER" "${{ steps.dl_hash_builder.outputs.path }}" | tee baseline_hash.txt
+          
+          # Extract root_sha256 from register payload.json
+          if [[ -f "register payload.json" ]]; then
+            ROOT_SHA256=$(jq -r '.root_sha256' "register payload.json")
+            echo "root_sha256=$ROOT_SHA256" >> "$GITHUB_OUTPUT"
+            echo "[info] Extracted root_sha256: $ROOT_SHA256"
+          else
+            echo "::warning::register payload.json not found"
+          fi
 
       - name: Print baseline information
         run: |
@@ -313,8 +323,12 @@ jobs:
             exit 1
           fi
           
+          # Get root_sha256 from hash_builder step output
+          ROOT_SHA256="${{ steps.hash_builder.outputs.root_sha256 }}"
+          
           echo "[info] Framework Version: $FRAMEWORK_VERSION"
           echo "[info] Baseline Hash: $BASELINE_HASH"
+          echo "[info] Root SHA256: $ROOT_SHA256"
           echo "[info] Framework Type: vllm-openai"
           echo "[info] ================================"
 
@@ -328,10 +342,10 @@ jobs:
           fi
           echo "[info] Registering baseline to API..."
           
-          # Extract baseline hash from baseline_hash.txt
-          BASELINE_HASH=$(grep -o 'hash: [a-f0-9]*' baseline_hash.txt | cut -d' ' -f2)
-          if [[ -z "$BASELINE_HASH" ]]; then
-            echo "::error::Could not extract baseline hash from baseline_hash.txt"
+          # Use root_sha256 from hash_builder step output as baseline_hash
+          BASELINE_HASH="${{ steps.hash_builder.outputs.root_sha256 }}"
+          if [[ -z "$BASELINE_HASH" || "$BASELINE_HASH" == "null" ]]; then
+            echo "::error::Could not get root_sha256 from hash_builder step"
             exit 1
           fi
           
