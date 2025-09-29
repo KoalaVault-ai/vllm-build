@@ -1,4 +1,4 @@
-name: Build Docker & Sign (cryptotensors-vllm, linux x64)
+name: Build vLLM Container and Sign
 
 on:
   workflow_dispatch:
@@ -15,18 +15,27 @@ on:
       container_name:
         description: "Container name for signing/scanning"
         required: false
-        default: "vllm-qwen3"
+        default: "vllm-openai"
         type: string
+      register_baseline:
+        description: "Register baseline to API (true/false)"
+        required: false
+        default: false
+        type: boolean
+      push_to_dockerhub:
+        description: "Push image to Docker Hub (true/false)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
-  packages: write
 
 env:
   PLATFORM_OS: linux
   ARCH: amd64
   DOCKERFILE: Dockerfile
-  IMAGE_NAME: cryptotensors-vllm-linux-x64
+  IMAGE_NAME: vllm-openai
 
 jobs:
   build-sign-push:
@@ -173,8 +182,28 @@ jobs:
           VTAG="${VTAG:-latest}"
           echo "vllm_tag=$VTAG" >> "$GITHUB_OUTPUT"
 
-          FRAMEWORK_VERSION="vllm-${VTAG}-${{ env.PLATFORM_OS }}-${{ env.ARCH }}-${{ github.event.inputs.cuda_suffix }}"
+          # Get GitHub commit information
+          GITHUB_SHA="${{ github.sha }}"
+          GITHUB_REF="${{ github.ref }}"
+          GITHUB_REF_NAME="${{ github.ref_name }}"
+          GITHUB_REPOSITORY="${{ github.repository }}"
+          GITHUB_RUN_ID="${{ github.run_id }}"
+          export GITHUB_SHA GITHUB_REF GITHUB_REF_NAME GITHUB_REPOSITORY GITHUB_RUN_ID
+
+          # Get git commit hash (use tag if available, otherwise use commit SHA)
+          GIT_COMMIT="${{ github.ref_name }}"
+          if [[ "$GIT_COMMIT" == "refs/heads/"* ]]; then
+            GIT_COMMIT="${{ github.sha }}"
+          fi
+          export GIT_COMMIT
+
+          # Build framework version with commit info (prefix with 'KV' for KoalaVault)
+          FRAMEWORK_VERSION="vllm-${VTAG}-${{ env.PLATFORM_OS }}-${{ env.ARCH }}-${{ github.event.inputs.cuda_suffix }}-KV${GIT_COMMIT:0:8}"
           export FRAMEWORK_VERSION
+
+          # Get current build date in ISO format
+          BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          export BUILD_DATE
 
           python3 - <<'PY'
           import json, os
@@ -187,6 +216,8 @@ jobs:
               except Exception:
                   data = {}
           data["framework_version"] = os.environ.get("FRAMEWORK_VERSION", "")
+          data["git_commit"] = os.environ.get("GIT_COMMIT", "")
+          data["build_date"] = os.environ.get("BUILD_DATE", "")
           with open(p, "w", encoding="utf-8") as f:
               json.dump(data, f, ensure_ascii=False, indent=2)
           print("== version.json ==")
@@ -195,30 +226,43 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Login GHCR
+      - name: Login Docker Hub
+        if: ${{ github.event.inputs.push_to_dockerhub == 'true' }}
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build image (push to GHCR)
+      - name: Build image
         id: build
         run: |
           set -euo pipefail
           TAG="${{ steps.meta.outputs.vllm_tag }}"
-          OWNER_LC="${GITHUB_REPOSITORY_OWNER,,}"
-          IMAGE_REF="ghcr.io/${OWNER_LC}/${{ env.IMAGE_NAME }}:${TAG}"
+          IMAGE_REF="${{ secrets.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${TAG}"
           echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
 
-          docker buildx build \
-            --platform "linux/${{ env.ARCH }}" \
-            --file "${{ env.DOCKERFILE }}" \
-            --build-arg "VLLM_TAG=${TAG}" \
-            --tag "${IMAGE_REF}" \
-            --provenance=false \
-            --push \
-            .
+          # Build with or without push based on input
+          if [[ "${{ github.event.inputs.push_to_dockerhub }}" == "true" ]]; then
+            echo "[info] Building and pushing image to Docker Hub"
+            docker buildx build \
+              --platform "${{ env.PLATFORM_OS }}/${{ env.ARCH }}" \
+              --file "${{ env.DOCKERFILE }}" \
+              --build-arg "VLLM_TAG=${TAG}" \
+              --tag "${IMAGE_REF}" \
+              --provenance=false \
+              --push \
+              .
+          else
+            echo "[info] Building image locally (not pushing to Docker Hub)"
+            docker buildx build \
+              --platform "${{ env.PLATFORM_OS }}/${{ env.ARCH }}" \
+              --file "${{ env.DOCKERFILE }}" \
+              --build-arg "VLLM_TAG=${TAG}" \
+              --tag "${IMAGE_REF}" \
+              --provenance=false \
+              --load \
+              .
+          fi
 
       - name: Drop build cache (free peak space)
         run: |
@@ -248,4 +292,83 @@ jobs:
           set -euo pipefail
           CONTAINER="${{ steps.run.outputs.container_name }}"
           echo "[debug] will scan container = $CONTAINER"
-          CONTAINER="$CONTAINER" "${{ steps.dl_hash_builder.outputs.path }}" | tee signature.txt
+          CONTAINER="$CONTAINER" "${{ steps.dl_hash_builder.outputs.path }}" | tee baseline_hash.txt
+
+      - name: Print baseline information
+        run: |
+          set -euo pipefail
+          echo "[info] === Baseline Information ==="
+          
+          # Extract baseline hash from baseline_hash.txt
+          BASELINE_HASH=$(grep -o 'hash: [a-f0-9]*' baseline_hash.txt | cut -d' ' -f2)
+          if [[ -z "$BASELINE_HASH" ]]; then
+            echo "::error::Could not extract baseline hash from baseline_hash.txt"
+            exit 1
+          fi
+          
+          # Get framework version from version.json
+          FRAMEWORK_VERSION=$(jq -r '.framework_version' version.json)
+          if [[ -z "$FRAMEWORK_VERSION" || "$FRAMEWORK_VERSION" == "null" ]]; then
+            echo "::error::Could not get framework_version from version.json"
+            exit 1
+          fi
+          
+          echo "[info] Framework Version: $FRAMEWORK_VERSION"
+          echo "[info] Baseline Hash: $BASELINE_HASH"
+          echo "[info] Framework Type: vllm-openai"
+          echo "[info] ================================"
+
+      - name: Register baseline to API
+        if: ${{ github.event.inputs.register_baseline == 'true' && vars.KOALAVAULT_API_BASE_URL != '' }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ secrets.KOALAVAULT_ADMIN_API_KEY }}" ]]; then
+            echo "::error::KOALAVAULT_ADMIN_API_KEY secret is not set"
+            exit 1
+          fi
+          echo "[info] Registering baseline to API..."
+          
+          # Extract baseline hash from baseline_hash.txt
+          BASELINE_HASH=$(grep -o 'hash: [a-f0-9]*' baseline_hash.txt | cut -d' ' -f2)
+          if [[ -z "$BASELINE_HASH" ]]; then
+            echo "::error::Could not extract baseline hash from baseline_hash.txt"
+            exit 1
+          fi
+          
+          # Get framework version from version.json
+          FRAMEWORK_VERSION=$(jq -r '.framework_version' version.json)
+          if [[ -z "$FRAMEWORK_VERSION" || "$FRAMEWORK_VERSION" == "null" ]]; then
+            echo "::error::Could not get framework_version from version.json"
+            exit 1
+          fi
+          
+          # Prepare baseline data
+          BASELINE_DATA=$(cat <<EOF
+          {
+            "framework_version": "$FRAMEWORK_VERSION",
+            "framework_type": "vllm-openai",
+            "baseline_hash": "$BASELINE_HASH",
+            "description": "vLLM framework baseline version $FRAMEWORK_VERSION",
+            "tag": "stable"
+          }
+          EOF
+          )
+          
+          echo "[info] Registering baseline: $FRAMEWORK_VERSION with hash: $BASELINE_HASH"
+          
+          # Register baseline
+          RESPONSE=$(curl -s -X POST "${{ vars.KOALAVAULT_API_BASE_URL }}/api/admin/framework/baselines" \
+            -H "Authorization: Bearer ${{ secrets.KOALAVAULT_ADMIN_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d "$BASELINE_DATA")
+          
+          # Check response
+          if echo "$RESPONSE" | jq -e '.success' > /dev/null; then
+            BASELINE_ID=$(echo "$RESPONSE" | jq -r '.data.id')
+            echo "[info] Baseline registered successfully with ID: $BASELINE_ID"
+            echo "[info] Note: Baseline is registered but not activated. Please activate manually if needed."
+          else
+            echo "::error::Failed to register baseline"
+            echo "$RESPONSE"
+            exit 1
+          fi
