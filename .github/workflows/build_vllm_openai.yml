@@ -269,23 +269,6 @@ jobs:
           docker rm -f "$CNAME" >/dev/null 2>&1 || true
           docker run -d --name "$CNAME" --entrypoint /bin/sh "${{ steps.build.outputs.image_ref }}" -lc "sleep infinity"
           echo "container_name=$CNAME" >> "$GITHUB_OUTPUT"
-
-      - name: Run hash-builder (scan/sign)
-        id: hash_builder
-        run: |
-          set -euo pipefail
-          CONTAINER="${{ steps.run.outputs.container_name }}"
-          echo "[debug] will scan container = $CONTAINER"
-          CONTAINER="$CONTAINER" "${{ steps.dl_hash_builder.outputs.path }}" | tee baseline_hash.txt
-          
-          # Extract root_sha256 from register payload.json
-          if [[ -f "register payload.json" ]]; then
-            ROOT_SHA256=$(jq -r '.root_sha256' "register payload.json")
-            echo "root_sha256=$ROOT_SHA256" >> "$GITHUB_OUTPUT"
-            echo "[info] Extracted root_sha256: $ROOT_SHA256"
-          else
-            echo "::warning::register payload.json not found"
-          fi
           
       - name: Run hash-builder (scan/sign)
         id: hash_builder
