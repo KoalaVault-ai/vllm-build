@@ -3,234 +3,135 @@ name: Build vLLM Container and Push to Docker Hub
 on:
   workflow_dispatch:
     inputs:
-      vllm_tag:
-        description: "vLLM upstream image tag (e.g., v0.9.2; leave empty to use Dockerfile ARG default value, i.e. latest)"
+      base_image:
+        description: "Base image (e.g., vllm/vllm-openai:v0.9.2, vllm-cpu-arm:v0.9.2)"
         required: false
+        default: "vllm/vllm-openai:v0.9.2"
         type: string
-      cuda_suffix:
-        description: "CUDA suffix of framework_version"
+      platform_os:
+        description: "Platform OS (e.g., linux)"
         required: false
-        default: "CUDA"
+        default: "linux"
         type: string
-      container_name:
-        description: "Container name for signing/scanning"
+      arch:
+        description: "Architecture (e.g., amd64, arm64)"
         required: false
-        default: "vllm-openai"
+        default: "amd64"
         type: string
       register_baseline:
         description: "Register baseline to API (true/false)"
         required: false
         default: false
         type: boolean
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+'
 permissions:
   contents: read
 
 env:
-  PLATFORM_OS: linux
-  ARCH: amd64
   DOCKERFILE: Dockerfile
-  IMAGE_NAME: vllm-openai
 
 jobs:
-  build-sign-push:
+  build-and-measure:
+    name: Build, Measure and Register
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Free Disk Space (fast)
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          dotnet: true
-          large-packages: true
-          docker-images: false
-
-      - name: Install jq (for parsing GitHub API)
+      - name: Read vLLM-Build version
+        id: vllm_build_ver
         run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends jq ca-certificates
-
-      - name: Download wheels (safetensors + cryptotensors linux x86_64)
-        id: dl_wheels
-        env:
-          GH_OWNER: koalavault
-          GH_REPO: cryptotensors
-          GH_TOKEN: ${{ secrets.KOALAVAULT_TOKEN }}
-        run: |
-          set -euo pipefail
-          auth=(-H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json")
-      
-          echo "[info] GET releases list" >&2
-          JSON=$(curl -fsSL "${auth[@]}" "https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/releases?per_page=100")
-      
-          ASSETS=$(printf '%s' "$JSON" | jq -c '
-            [ .[] | {tag:.tag_name, draft, prerelease, assets:(.assets // [])} ]
-            | map(.assets[]? as $a | {tag, draft, prerelease} + {id:$a.id, name:$a.name, created_at:$a.created_at})
-          ')
-          [[ "$ASSETS" != "[]" && -n "$ASSETS" ]] || { echo "::error::No assets visible."; exit 1; }
-      
-          # safetensors: safetensors-*.whl
-          SAFE_LINE=$(printf '%s' "$ASSETS" | jq -r '
-            .[] 
-            | select(.name|test("^safetensors-.*\\.whl$"; "i"))
-            | {name, id, created_at, 
-                v: ((.name | capture("^safetensors-(?<v>[0-9][0-9\\.]*)")).v // "")}
-            | [.name, .v, (.id|tostring), .created_at] | @tsv
-          ' | sort -t$'\t' -k2,2V -k4,4 | tail -n1)
-          [[ -n "${SAFE_LINE}" ]] || { echo "::error::No safetensors wheel found."; exit 1; }
-          SAFE_NAME=$(cut -f1 <<<"$SAFE_LINE"); SAFE_ID=$(cut -f3 <<<"$SAFE_LINE")
-      
-          # cryptotensors: cryptotensors + linux + x86_64 + .whl
-          CRYPTO_LINE=$(printf '%s' "$ASSETS" | jq -r '
-            .[] 
-            | select(.name|test("cryptotensors"; "i")) 
-            | select(.name|test("linux"; "i")) 
-            | select(.name|test("x86_64"; "i")) 
-            | select(.name|test("\\.whl$"; "i"))
-            | {name, id, created_at,
-                v: ((.name | capture("^cryptotensors-(?<v>[0-9][0-9\\.]*)")).v // "")}
-            | [.name, .v, (.id|tostring), .created_at] | @tsv
-          ' | sort -t$'\t' -k2,2V -k4,4 | tail -n1)
-          [[ -n "${CRYPTO_LINE}" ]] || { echo "::error::No cryptotensors linux x86_64 wheel found."; exit 1; }
-          CRYPTO_NAME=$(cut -f1 <<<"$CRYPTO_LINE"); CRYPTO_ID=$(cut -f3 <<<"$CRYPTO_LINE")
-      
-          download_asset () {
-            local ID="${1:?missing asset id}"
-            local OUT="${2:?missing output filename}"
-            local URL="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/releases/assets/${ID}"
-            echo "[info] Downloading ${OUT} via ${URL}" >&2
-            curl -fsSLL \
-              -H "Authorization: Bearer ${GH_TOKEN}" \
-              -H "Accept: application/octet-stream" \
-              -o "${OUT}" \
-              "${URL}"
-          }
-      
-          # Download with original file names (canonical wheel names)
-          download_asset "${SAFE_ID}"   "${SAFE_NAME}"
-          download_asset "${CRYPTO_ID}" "${CRYPTO_NAME}"
-      
-          # Copy to fixed names for easy reference; original names remain for pip
-          cp -f "$SAFE_NAME" safetensors.whl
-          cp -f "$CRYPTO_NAME" cryptotensors.whl
-      
-          # Expose both "fixed-name paths" and "original names" as outputs
-          echo "safetensors_path=$PWD/safetensors.whl"     >> "$GITHUB_OUTPUT"
-          echo "cryptotensors_path=$PWD/cryptotensors.whl" >> "$GITHUB_OUTPUT"
-          echo "safe_wheel=$SAFE_NAME"   >> "$GITHUB_OUTPUT"
-          echo "crypto_wheel=$CRYPTO_NAME" >> "$GITHUB_OUTPUT"
-      
-          sha256sum "$SAFE_NAME" "$CRYPTO_NAME" || true
-
-      - name: Download hash-builder by asset id (private-friendly)
-        id: dl_hash_builder
-        env:
-          GH_OWNER: koalavault
-          GH_REPO: cryptotensors
-          GH_TOKEN: ${{ secrets.KOALAVAULT_TOKEN }}   # your PAT
-          ASSET_PREFIX: hash-builder-linux-amd64
-          RELEASE_TAG: hash-builder                    # since your tag is called hash-builder, lock to it
-        run: |
-          set -euo pipefail
-      
-          # 1) Get release exactly by tag
-          REL_API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/releases/tags/${RELEASE_TAG}"
-          REL_JSON=$(curl -fsSL \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/vnd.github+json" \
-            "$REL_API")
-      
-          # 2) Find the asset in this release and extract asset id
-          ASSET_ID=$(echo "$REL_JSON" | jq -r --arg p "$ASSET_PREFIX" '
-            .assets[] | select(.name | startswith($p)) | .id
-          ' | head -n1)
-      
-          if [[ -z "${ASSET_ID}" || "${ASSET_ID}" == "null" ]]; then
-            echo "::error::Cannot find asset starting with '${ASSET_PREFIX}' in tag=${RELEASE_TAG}"
-            echo "$REL_JSON" | jq '{tag:.tag_name, draft, prerelease, assets:[.assets[]?|{name, id, size, created_at}] }'
+          # Get version from git tag (must be exact match on current commit)
+          VLLM_BUILD_VERSION=$(git describe --tags --exact-match 2>/dev/null)
+          if [ -z "$VLLM_BUILD_VERSION" ]; then
+            echo "::error::No git tag found for current commit. Please create a tag first."
             exit 1
           fi
-      
-          # 3) Use official assets/{id} download endpoint (works for private/cross-repo)
-          DL_API="https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/releases/assets/${ASSET_ID}"
-          echo "[info] download asset_id=${ASSET_ID} via $DL_API"
-          curl -fsSLL \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H "Accept: application/octet-stream" \
-            -o hash-builder \
-            "$DL_API"
-      
-          chmod +x hash-builder
-          echo "path=$PWD/hash-builder" >> "$GITHUB_OUTPUT"
-          sha256sum hash-builder || true
+          echo "vllm_build_version=$VLLM_BUILD_VERSION" >> "$GITHUB_OUTPUT"
+          echo "vLLM-Build version from git: $VLLM_BUILD_VERSION"
 
-      - name: Determine vLLM tag & write version.json
+      - name: Download cryptotensors packages
+        uses: robinraju/release-downloader@v1
+        with:
+          repository: koalavault/cryptotensors
+          latest: true
+          fileName: |
+            safetensors-*.whl
+            cryptotensors-*-linux_*.whl
+          token: ${{ secrets.KOALAVAULT_TOKEN }}
+
+      - name: Extract CryptoTensors version
+        id: crypto_version
+        run: |
+          # Extract version from cryptotensors wheel filename
+          # e.g., cryptotensors-0.1.0-cp38-abi3-linux_x86_64.whl -> v0.1.0
+          CRYPTO_WHL=$(ls cryptotensors-*.whl | head -1)
+          CRYPTO_VERSION=$(echo "$CRYPTO_WHL" | sed 's/cryptotensors-//' | sed 's/-cp.*//')
+          CRYPTO_VERSION="v${CRYPTO_VERSION}"
+          echo "cryptotensors_version=$CRYPTO_VERSION" >> "$GITHUB_OUTPUT"
+          echo "CryptoTensors version: $CRYPTO_VERSION"
+
+      - name: Determine build metadata
         id: meta
         run: |
           set -euo pipefail
-          # For push tag trigger, use the tag as vllm_tag; for workflow_dispatch, use input or default
-          if [[ "${{ github.event_name }}" == "push" ]]; then
-            VTAG="${{ github.ref_name }}"
-          else
-            VTAG="${{ github.event.inputs.vllm_tag || '' }}"
-            if [[ -z "$VTAG" ]]; then
-              VTAG="$(awk -F= '/^ARG[[:space:]]+VLLM_TAG=/{print $2; exit}' "${{ env.DOCKERFILE }}")"
-            fi
-            VTAG="${VTAG:-latest}"
+          # Get inputs
+          BASE_IMAGE="${{ github.event.inputs.base_image }}"
+          echo "base_image=$BASE_IMAGE" >> "$GITHUB_OUTPUT"
+          
+          PLATFORM_OS="${{ github.event.inputs.platform_os }}"
+          ARCH="${{ github.event.inputs.arch }}"
+          echo "platform_os=$PLATFORM_OS" >> "$GITHUB_OUTPUT"
+          echo "arch=$ARCH" >> "$GITHUB_OUTPUT"
+          
+          # Extract image name from base image
+          # Step 1: Remove repository path (everything before last /)
+          # Step 2: Remove tag (everything after :)
+          # e.g., vllm/vllm-openai:v0.9.2 -> vllm-openai
+          # e.g., vllm-cpu-arm:v0.9.2 -> vllm-cpu-arm
+          IMAGE_NAME=$(echo "$BASE_IMAGE" | sed 's|.*/||' | sed 's/:.*$//')
+          echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+          
+          # Extract tag from base image (this is the vLLM version)
+          IMAGE_TAG=$(echo "$BASE_IMAGE" | sed 's/.*://')
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "vllm_version=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+
+          # Get CryptoTensors version
+          CRYPTO_VERSION="${{ steps.crypto_version.outputs.cryptotensors_version }}"
+          echo "cryptotensors_version=$CRYPTO_VERSION" >> "$GITHUB_OUTPUT"
+          
+          # Get vllm-build version from version.json file
+          VLLM_BUILD_VERSION="${{ steps.vllm_build_ver.outputs.vllm_build_version }}"
+          echo "vllm_build_version=$VLLM_BUILD_VERSION" >> "$GITHUB_OUTPUT"
+
+          # Auto-detect platform suffix from base image name (lowercase)
+          PLATFORM_SUFFIX="cuda"
+          if [[ "$BASE_IMAGE" =~ cpu ]]; then
+            PLATFORM_SUFFIX="cpu"
+          elif [[ "$BASE_IMAGE" =~ rocm ]]; then
+            PLATFORM_SUFFIX="rocm"
+          elif [[ "$BASE_IMAGE" =~ tpu ]]; then
+            PLATFORM_SUFFIX="tpu"
           fi
-          echo "vllm_tag=$VTAG" >> "$GITHUB_OUTPUT"
+          
+          # Build framework version: vllm-{version}-{arch}-{cuda/cpu}-{os}-build-{vllm-build-ver}-cryptotensors-{crypto-ver}
+          FRAMEWORK_VERSION="vllm-${IMAGE_TAG}-${ARCH}-${PLATFORM_SUFFIX}-${PLATFORM_OS}-build-${VLLM_BUILD_VERSION}-cryptotensors-${CRYPTO_VERSION}"
+          echo "framework_version=$FRAMEWORK_VERSION" >> "$GITHUB_OUTPUT"
 
-          # Get GitHub commit information
-          GITHUB_SHA="${{ github.sha }}"
-          GITHUB_REF="${{ github.ref }}"
-          GITHUB_REF_NAME="${{ github.ref_name }}"
-          GITHUB_REPOSITORY="${{ github.repository }}"
-          GITHUB_RUN_ID="${{ github.run_id }}"
-          export GITHUB_SHA GITHUB_REF GITHUB_REF_NAME GITHUB_REPOSITORY GITHUB_RUN_ID
+          # Get current build date (YYYY-MM-DD format)
+          BUILD_DATE=$(date -u +"%Y-%m-%d")
+          echo "build_date=$BUILD_DATE" >> "$GITHUB_OUTPUT"
 
-          # Get git commit hash (use tag if available, otherwise use commit SHA)
-          GIT_COMMIT="${{ github.ref_name }}"
-          if [[ "$GIT_COMMIT" == "refs/heads/"* ]]; then
-            GIT_COMMIT="${{ github.sha }}"
-          fi
-          export GIT_COMMIT
-
-          # Build framework version with commit info (prefix with 'KV' for KoalaVault)
-          # For push tag trigger, use default CUDA suffix; for workflow_dispatch, use input or default
-          if [[ "${{ github.event_name }}" == "push" ]]; then
-            CUDA_SUFFIX="CUDA"
-          else
-            CUDA_SUFFIX="${{ github.event.inputs.cuda_suffix || 'CUDA' }}"
-          fi
-          FRAMEWORK_VERSION="vllm-${VTAG}-${{ env.PLATFORM_OS }}-${{ env.ARCH }}-${CUDA_SUFFIX}-KV${GIT_COMMIT:0:8}"
-          export FRAMEWORK_VERSION
-
-          # Get current build date in ISO format
-          BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          export BUILD_DATE
-
-          python3 - <<'PY'
-          import json, os
-          p = "version.json"
-          data = {}
-          if os.path.exists(p):
-              try:
-                  with open(p, "r", encoding="utf-8") as f:
-                      data = json.load(f)
-              except Exception:
-                  data = {}
-          data["framework_version"] = os.environ.get("FRAMEWORK_VERSION", "")
-          data["git_commit"] = os.environ.get("GIT_COMMIT", "")
-          data["build_date"] = os.environ.get("BUILD_DATE", "")
-          with open(p, "w", encoding="utf-8") as f:
-              json.dump(data, f, ensure_ascii=False, indent=2)
-          print("== version.json ==")
-          print(json.dumps(data, ensure_ascii=False, indent=2))
-          PY
+          echo "=== Build Metadata ==="
+          echo "Base Image: $BASE_IMAGE"
+          echo "Image Name: $IMAGE_NAME"
+          echo "Arch: $ARCH"
+          echo "Platform: $PLATFORM_SUFFIX"
+          echo "OS: $PLATFORM_OS"
+          echo "vLLM Version: $IMAGE_TAG"
+          echo "vLLM-Build Version: $VLLM_BUILD_VERSION"
+          echo "CryptoTensors Version: $CRYPTO_VERSION"
+          echo "Framework Version: $FRAMEWORK_VERSION"
+          echo "Build Date: $BUILD_DATE"
 
       - uses: docker/setup-buildx-action@v3
 
@@ -240,134 +141,126 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build image
+      - name: Build and push application image
         id: build
         run: |
           set -euo pipefail
-          TAG="${{ steps.meta.outputs.vllm_tag }}"
-          IMAGE_REF="${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:${TAG}"
-          IMAGE_REF_LATEST="${{ vars.DOCKERHUB_USERNAME }}/${{ env.IMAGE_NAME }}:latest"
+          IMAGE_NAME="${{ steps.meta.outputs.image_name }}"
+          TAG="${{ steps.meta.outputs.image_tag }}"
+          PLATFORM="${{ steps.meta.outputs.platform_os }}/${{ steps.meta.outputs.arch }}"
+          IMAGE_REF="${{ vars.DOCKERHUB_USERNAME }}/${IMAGE_NAME}:${TAG}"
           echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
-          echo "image_ref_latest=${IMAGE_REF_LATEST}" >> "$GITHUB_OUTPUT"
 
-          # Build with push based on input
-          echo "[info] Building and pushing image to Docker Hub with tags: ${TAG} and latest"
+          # Build and push application image
+          echo "[Stage 1] Building from base image: ${{ steps.meta.outputs.base_image }}"
+          echo "[Stage 1] Target image: ${IMAGE_REF}"
+          echo "[Stage 1] Platform: ${PLATFORM}"
           docker buildx build \
-            --platform "${{ env.PLATFORM_OS }}/${{ env.ARCH }}" \
+            --platform "${PLATFORM}" \
             --file "${{ env.DOCKERFILE }}" \
-            --build-arg "VLLM_TAG=${TAG}" \
+            --build-arg "BASE_IMAGE=${{ steps.meta.outputs.base_image }}" \
+            --build-arg "FRAMEWORK_VERSION=${{ steps.meta.outputs.framework_version }}" \
+            --build-arg "VLLM_VERSION=${{ steps.meta.outputs.vllm_version }}" \
+            --build-arg "VLLM_BUILD_VERSION=${{ steps.meta.outputs.vllm_build_version }}" \
+            --build-arg "CRYPTOTENSORS_VERSION=${{ steps.meta.outputs.cryptotensors_version }}" \
+            --build-arg "BUILD_DATE=${{ steps.meta.outputs.build_date }}" \
             --tag "${IMAGE_REF}" \
-            --tag "${IMAGE_REF_LATEST}" \
             --provenance=false \
             --push \
             .
 
-      - name: Drop build cache (free peak space)
+      - name: Print build summary
         run: |
-          set -euo pipefail
-          docker buildx du || true
-          docker buildx prune -af
-          docker image prune -af || true
-          df -h || true
+          echo "✓ Build Complete: Application Image Built and Pushed"
+          echo "Image: ${{ steps.build.outputs.image_ref }}"
+          echo "Image Name: ${{ steps.meta.outputs.image_name }}"
+          echo "Platform: ${{ steps.meta.outputs.platform_os }}/${{ steps.meta.outputs.arch }}"
+          echo "vLLM Version: ${{ steps.meta.outputs.vllm_version }}"
+          echo "vLLM-Build Version: ${{ steps.meta.outputs.vllm_build_version }}"
+          echo "CryptoTensors Version: ${{ steps.meta.outputs.cryptotensors_version }}"
+          echo "Framework Version: ${{ steps.meta.outputs.framework_version }}"
 
-      - name: Pull image for local run
-        id: pull
+      - name: Determine hash-builder architecture
+        id: hash_arch
         run: |
-          set -euo pipefail
-          docker pull "${{ steps.build.outputs.image_ref }}"
-
-      - name: Run container (sleep)
-        id: run
-        run: |
-          set -euo pipefail
-          # For push tag trigger, use default container name; for workflow_dispatch, use input or default
-          if [[ "${{ github.event_name }}" == "push" ]]; then
-            CNAME="vllm-openai"
+          ARCH="${{ steps.meta.outputs.arch }}"
+          # Map arch to hash-builder file naming convention
+          if [[ "$ARCH" == "amd64" ]]; then
+            HASH_ARCH="x86_64"
+          elif [[ "$ARCH" == "arm64" ]]; then
+            HASH_ARCH="aarch64"
           else
-            CNAME="${{ github.event.inputs.container_name || 'vllm-openai' }}"
+            HASH_ARCH="$ARCH"
           fi
-          docker rm -f "$CNAME" >/dev/null 2>&1 || true
-          docker run -d --name "$CNAME" --entrypoint /bin/sh "${{ steps.build.outputs.image_ref }}" -lc "sleep infinity"
-          echo "container_name=$CNAME" >> "$GITHUB_OUTPUT"
+          echo "hash_arch=$HASH_ARCH" >> "$GITHUB_OUTPUT"
+          echo "Hash-builder architecture: linux-${HASH_ARCH}"
+
+      - name: Download hash-builder binary
+        uses: robinraju/release-downloader@v1
+        with:
+          repository: koalavault/cryptotensors
+          latest: true
+          fileName: hash-builder-linux-${{ steps.hash_arch.outputs.hash_arch }}
+          token: ${{ secrets.KOALAVAULT_TOKEN }}
           
-      - name: Run hash-builder (scan/sign)
-        id: hash_builder
+      - name: Prepare hash-builder
+        run: |
+          mv hash-builder-linux-${{ steps.hash_arch.outputs.hash_arch }} hash-builder
+          chmod +x hash-builder
+
+      - name: Build measurement image and extract hash
+        id: measure
         run: |
           set -euo pipefail
-          CONTAINER="${{ steps.run.outputs.container_name }}"
-          HB="${{ steps.dl_hash_builder.outputs.path }}"
-          HB="$(realpath -P "$HB")"
-          HB_DIR="$(dirname "$HB")"
-          HB_PARENT="$(dirname "$HB_DIR")"
-
-          echo "[debug] run hash-builder: $HB (container=$CONTAINER)"
-          CONTAINER="$CONTAINER" "$HB" | tee baseline_hash.txt
-
-          if [[ -f "./register_payload.json" ]]; then
-            PAYLOAD="./register_payload.json"
-          elif [[ -f "$HB_DIR/register_payload.json" ]]; then
-            PAYLOAD="$HB_DIR/register_payload.json"
-          elif [[ -f "$HB_PARENT/register_payload.json" ]]; then
-            PAYLOAD="$HB_PARENT/register_payload.json"
-          else
-            echo "::error::register_payload.json not found in ./ or $HB_DIR or $HB_PARENT"
+          
+          echo "Building measurement image with BuildKit export"
+          echo "Base image: ${{ steps.build.outputs.image_ref }}"
+          mkdir -p ./measurements
+          
+          docker buildx build \
+            -f Dockerfile.measure \
+            --build-arg BASE_IMAGE="${{ steps.build.outputs.image_ref }}" \
+            --target export \
+            --output type=local,dest=./measurements \
+            .
+          
+          echo "Measurement file extracted to ./measurements/"
+          ls -la ./measurements/
+          
+          if [[ ! -f "./measurements/baseline_hash.txt" ]]; then
+            echo "::error::baseline_hash.txt not found in measurements output"
             exit 1
           fi
-
-          MEAS_HASH="$(jq -r '.measurement_hash // .root_sha256 // empty' "$PAYLOAD")"
-          [[ -z "$MEAS_HASH" ]] && { echo "::error::measurement_hash missing in $PAYLOAD"; exit 1; }
-
+          
+          MEAS_HASH="$(cat ./measurements/baseline_hash.txt | tr -d '\n')"
+          if [[ -z "$MEAS_HASH" ]]; then
+            echo "::error::measurement_hash is empty in baseline_hash.txt"
+            exit 1
+          fi
+          
           echo "measurement_hash=$MEAS_HASH" >> "$GITHUB_OUTPUT"
-          echo "[info] Extracted measurement_hash: $MEAS_HASH from $PAYLOAD"
-
-
+          echo "Measurement hash: $MEAS_HASH"
 
       - name: Print baseline information
         run: |
-          set -euo pipefail
-          echo "[info] === Baseline Information ==="
-          
-          
-          # Get framework version from version.json
-          FRAMEWORK_VERSION=$(jq -r '.framework_version' version.json)
-          if [[ -z "$FRAMEWORK_VERSION" || "$FRAMEWORK_VERSION" == "null" ]]; then
-            echo "::error::Could not get framework_version from version.json"
-            exit 1
-          fi
-          
-          # Get root_sha256 from hash_builder step output
-          ROOT_SHA256="${{ steps.hash_builder.outputs.measurement_hash }}"
-          
-          echo "[info] Framework Version: $FRAMEWORK_VERSION"
-          echo "[info] Baseline Hash: $ROOT_SHA256"
-          echo "[info] Framework Type: vllm-openai"
-          echo "[info] ================================"
+          echo "✓ Baseline Measured Successfully"
+          echo "=== Baseline Information ==="
+          echo "Framework Version: ${{ steps.meta.outputs.framework_version }}"
+          echo "Measurement Hash: ${{ steps.measure.outputs.measurement_hash }}"
+          echo "Framework Type: vllm"
+          echo "Image: ${{ steps.build.outputs.image_ref }}"
+          echo "================================"
 
       - name: Register baseline to API
-        if: ${{ (github.event_name == 'push' && false) || (github.event_name == 'workflow_dispatch' && github.event.inputs.register_baseline == 'true') }} && vars.KOALAVAULT_API_BASE_URL != ''
+        if: ${{ github.event.inputs.register_baseline == 'true' && vars.KOALAVAULT_API_BASE_URL != '' }}
         run: |
           set -euo pipefail
-          if [[ -z "${{ secrets.KOALAVAULT_ADMIN_API_KEY }}" ]]; then
-            echo "::error::KOALAVAULT_ADMIN_API_KEY secret is not set"
-            exit 1
-          fi
+          
           echo "[info] Registering baseline to API..."
           
-          # Use root_sha256 from hash_builder step output as baseline_hash
-          BASELINE_HASH="${{ steps.hash_builder.outputs.measurement_hash }}"
-          if [[ -z "$BASELINE_HASH" || "$BASELINE_HASH" == "null" ]]; then
-            echo "::error::Could not get root_sha256 from hash_builder step"
-            exit 1
-          fi
+          BASELINE_HASH="${{ steps.measure.outputs.measurement_hash }}"
+          FRAMEWORK_VERSION="${{ steps.meta.outputs.framework_version }}"
           
-          # Get framework version from version.json
-          FRAMEWORK_VERSION=$(jq -r '.framework_version' version.json)
-          if [[ -z "$FRAMEWORK_VERSION" || "$FRAMEWORK_VERSION" == "null" ]]; then
-            echo "::error::Could not get framework_version from version.json"
-            exit 1
-          fi
-          
-          # Prepare baseline data
           BASELINE_DATA=$(cat <<EOF
           {
             "framework_version": "$FRAMEWORK_VERSION",
@@ -381,13 +274,11 @@ jobs:
           
           echo "[info] Registering baseline: $FRAMEWORK_VERSION with hash: $BASELINE_HASH"
           
-          # First, get JWT token using API key
           echo "[info] Getting admin JWT token..."
           TOKEN_RESPONSE=$(curl -s -X POST "${{ vars.KOALAVAULT_API_BASE_URL }}/api/admin/api-key-login" \
             -H "Content-Type: application/json" \
             -d "{\"api_key\": \"${{ secrets.KOALAVAULT_ADMIN_API_KEY }}\"}")
           
-          # Extract JWT token
           JWT_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.data.access_token')
           
           if [ "$JWT_TOKEN" = "null" ] || [ -z "$JWT_TOKEN" ]; then
@@ -398,13 +289,11 @@ jobs:
           
           echo "[info] JWT token obtained successfully"
           
-          # Register baseline using JWT token
           RESPONSE=$(curl -s -X POST "${{ vars.KOALAVAULT_API_BASE_URL }}/api/admin/framework/baselines" \
             -H "Authorization: Bearer $JWT_TOKEN" \
             -H "Content-Type: application/json" \
             -d "$BASELINE_DATA")
           
-          # Check response
           if echo "$RESPONSE" | jq -e '.success' > /dev/null; then
             BASELINE_ID=$(echo "$RESPONSE" | jq -r '.data.id')
             echo "[info] Baseline registered successfully with ID: $BASELINE_ID"

@@ -1,80 +1,60 @@
-# syntax=docker/dockerfile:1.6
+# Base image (can be local or remote)
+ARG BASE_IMAGE=vllm/vllm-openai:latest
 
-ARG VLLM_TAG=latest
+# Build arguments for version metadata (required)
+ARG FRAMEWORK_VERSION
+ARG VLLM_VERSION
+ARG VLLM_BUILD_VERSION
+ARG CRYPTOTENSORS_VERSION
+ARG BUILD_DATE
 
-# ---- Runtime image (directly install from source) ----
-FROM vllm/vllm-openai:${VLLM_TAG} AS runtime
-ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 CT_ROOT=/opt/cryptotensors
-ENV PY=python3 PIP="python3 -m pip"
+FROM ${BASE_IMAGE}
 
-########## Install necessary tools ########## 
-# Install basic dependencies (cryptotensors requires compilation)
-RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      tini curl ca-certificates build-essential pkg-config libssl-dev \
-      python3 python3-pip python3-dev gcc g++ \
-    && rm -rf /var/lib/apt/lists/*
+# Basic environment
+ENV PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
-# Install Rust/Cargo via rustup
-ENV RUSTUP_HOME=/root/.rustup CARGO_HOME=/root/.cargo PATH=/root/.cargo/bin:$PATH \
-    CARGO_REGISTRIES_CRATES_IO_PROTOCOL=sparse
-RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable && \
-    rustc -V && cargo -V
+# Install tini for proper signal handling (if not already in base image)
+RUN if ! command -v tini &> /dev/null; then \
+        apt-get update && \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tini && \
+        rm -rf /var/lib/apt/lists/*; \
+    fi
 
-########## Inject version.json ########## 
-# Write version.json into site-packages
-COPY version.json /usr/local/lib/python3.12/version.json
+# Generate version.json dynamically from build args
+ARG FRAMEWORK_VERSION
+ARG VLLM_VERSION
+ARG VLLM_BUILD_VERSION
+ARG CRYPTOTENSORS_VERSION
+ARG BUILD_DATE
+RUN PYTHON_SITE=$(python3 -c "import site; print(site.getsitepackages()[0])") && \
+    mkdir -p "$PYTHON_SITE" && \
+    printf '{\n  "framework_version": "%s",\n  "framework": "vllm",\n  "vllm_version": "%s",\n  "vllm_build_version": "%s",\n  "cryptotensors_version": "%s",\n  "build_date": "%s"\n}\n' \
+        "${FRAMEWORK_VERSION}" "${VLLM_VERSION}" "${VLLM_BUILD_VERSION}" "${CRYPTOTENSORS_VERSION}" "${BUILD_DATE}" > "$PYTHON_SITE/version.json" && \
+    echo "=========================================" && \
+    echo "version.json location: $PYTHON_SITE/version.json" && \
+    echo "=========================================" && \
+    cat "$PYTHON_SITE/version.json" && \
+    echo "========================================="
 
+# Install pre-compiled wheels (no compilation needed)
+COPY cryptotensors-*.whl safetensors-*.whl /tmp/
 
-########## Install safetensors & cryptotensors from wheels ##########
-COPY *.whl /tmp/
-
-RUN ${PY} -m pip uninstall -y safetensors || true && \
-    ${PIP} install --upgrade pip && \
-    ${PIP} install --no-cache-dir /tmp/cryptotensors-*.whl && \
-    ${PIP} install --no-cache-dir /tmp/safetensors-*.whl && \
+RUN python3 -m pip uninstall -y safetensors || true && \
+    python3 -m pip install --no-cache-dir /tmp/cryptotensors-*.whl /tmp/safetensors-*.whl && \
     rm -f /tmp/*.whl
 
-
-########## Inject client_init into vllm source code ########## 
-# Inject patch snippet and directly modify vLLM’s weight_utils.py inside the container
-COPY patch_weight_utils.py /tmp/patch_weight_utils.py
-RUN python3 - <<'PY'
-import sys, sysconfig, pathlib, re
-pure = pathlib.Path(sysconfig.get_paths()["purelib"])
-cands = list(pure.glob("vllm/**/model_loader/weight_utils.py"))
-if not cands:
-    print("[ERROR] vllm weight_utils.py not found", file=sys.stderr); sys.exit(1)
-dst = cands[0]
-src = dst.read_text(encoding="utf-8")
-snippet = pathlib.Path("/tmp/patch_weight_utils.py").read_text(encoding="utf-8").strip("\n")
-if "from cryptotensors import client_init" in src:
-    print("[patch] already applied:", dst)
-else:
-    pat = re.compile(r'(?m)^(?P<indent>[ \t]*)with\s+safe_open\(\s*st_file\s*,[^)]*\)\s+as\s+f\s*:\s*$')
-    m = pat.search(src)
-    if not m:
-        print("[ERROR] insertion point not found (with safe_open(...): line)", file=sys.stderr); sys.exit(1)
-    def indent_block(block: str, indent: str) -> str:
-        return "\n".join((indent + ln if ln.strip() else ln) for ln in block.splitlines())
-    patched = src[:m.start()] + indent_block(snippet, m.group("indent")) + "\n" + src[m.start():]
-    dst.write_text(patched, encoding="utf-8")
-    print(f"[patch] applied to {dst}")
-PY
-
-# Verify patch
-RUN python3 - <<'PY'
-import sys, sysconfig, pathlib
-pure = pathlib.Path(sysconfig.get_paths()["purelib"])
-p = list(pure.glob("vllm/**/model_loader/weight_utils.py"))[0]
-ok = "from cryptotensors import client_init" in p.read_text(encoding="utf-8")
-print(f"[verify] {p} contains client_init? -> {ok}")
-sys.exit(0 if ok else 2)
-PY
-
-########## Inject and modify entry script ########## 
-# boot script
+# Install boot script
 COPY boot.py /usr/local/bin/boot
 RUN chmod +x /usr/local/bin/boot
 
-WORKDIR ${CT_ROOT}
-ENTRYPOINT ["/usr/bin/tini","-g","--","/usr/local/bin/boot"]
+# Create symbolic links to consolidate tmpfs mounts
+# All runtime caches will be stored in /tmp, reducing Docker run arguments
+RUN mkdir -p /root/.cache && \
+    mkdir -p /tmp/triton /tmp/vllm /tmp/torch && \
+    ln -sf /tmp/triton /root/.triton && \
+    ln -sf /tmp/vllm /root/.cache/vllm && \
+    ln -sf /tmp/torch /root/.cache/torch
+
+WORKDIR /workspace
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/boot"]

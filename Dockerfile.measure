@@ -1,0 +1,20 @@
+# Measurement Dockerfile
+#
+# Generates only baseline_hash.txt with the measurement hash
+# Framework metadata is handled by workflow, not in hash-builder
+
+ARG BASE_IMAGE=localhost/vllm:latest
+FROM ${BASE_IMAGE} AS scanner
+
+WORKDIR /measurements
+
+# Copy hash-builder binary (downloaded by workflow)
+COPY hash-builder /usr/local/bin/hash-builder
+RUN chmod +x /usr/local/bin/hash-builder
+
+# Run measurement (uses default paths from hash-builder, synced with attestation.rs)
+RUN OUT_FILE=/measurements/baseline_hash.txt /usr/local/bin/hash-builder
+
+# Export stage
+FROM scratch AS export
+COPY --from=scanner /measurements/baseline_hash.txt /baseline_hash.txt

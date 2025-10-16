@@ -89,75 +89,109 @@ def find_forbidden(vllm_args):
     return hits
 
 def main():
+    # ---- Ensure runtime cache directories exist (for tmpfs mounts) ----
+    # When using --tmpfs /tmp, the symlink targets need to be recreated
+    os.makedirs("/tmp/triton", exist_ok=True)
+    os.makedirs("/tmp/vllm", exist_ok=True)
+    os.makedirs("/tmp/torch", exist_ok=True)
+    
     argv = sys.argv[1:]
     crypto_args, vllm_args = split_args(argv)
 
-    # ---- Block trust-remote-code ----
-    forbidden = find_forbidden(vllm_args)
-    if forbidden:
+    # ---- Get API key with clear priority and logging ----
+    # Priority: CLI argument > Environment variable
+    api_key_from_cli = get_arg(crypto_args, "koalavault-api-key")
+    api_key_from_env = os.environ.get("KOALAVAULT_API_KEY")
+    
+    api_key = None
+    api_key_source = None
+    
+    if api_key_from_cli and api_key_from_env:
+        # Both provided - use CLI and warn about override
+        api_key = api_key_from_cli
+        api_key_source = "command-line argument"
         print(
-            "[koalavault] Unsupported option(s) detected and blocked:\n  - "
-            + "\n  - ".join(forbidden)
-            + "\n[koalavault] This container **does not support trust-remote-code**. "
-              "Please remove these options/env and retry.",
-            flush=True,
+            f"[koalavault] API key provided via both CLI and environment variable.\n"
+            f"[koalavault] Using CLI argument (--koalavault-api-key) - environment variable ignored.",
+            flush=True
         )
-        sys.exit(7)
-
-    # ---- Get API key from CLI only ----
-    api_key = get_arg(crypto_args, "koalavault-api-key")
-
-    # Parse combined model parameter in format "owner/model_name"
-    model_combined = get_arg(crypto_args, "koalavault-model")
-    if model_combined:
-        if "/" in model_combined:
-            model_owner, model_name = model_combined.split("/", 1)
-        else:
-            print(f"[koalavault] Invalid model format: {model_combined}. Expected format: owner/model_name", flush=True)
-            sys.exit(2)
+    elif api_key_from_cli:
+        api_key = api_key_from_cli
+        api_key_source = "command-line argument"
+    elif api_key_from_env:
+        api_key = api_key_from_env
+        api_key_source = "environment variable (KOALAVAULT_API_KEY)"
     else:
-        model_owner = None
-        model_name = None
-    model_path  = get_arg(vllm_args, "model")
+        # No API key provided
+        print(
+            "[koalavault] No API key provided - running in standard vLLM mode.\n",
+            flush=True
+        )
 
-    # Check required parameters
-    missing = []
-    if not model_owner or not model_name: missing.append("--koalavault-model <owner/model_name>")
-    if not model_path:  missing.append("--model")
-    if missing:
-        print(f"[koalavault] Missing required params: {', '.join(missing)}", flush=True)
-        sys.exit(2)
-
-    # Write back environment variables (using weird names to avoid conflicts)
+    # ---- Only validate koalavault parameters if API key is provided ----
     if api_key:
-        os.environ["__KV_INTERNAL_API_KEY__"] = str(api_key)
-    os.environ["__KV_INTERNAL_MODEL_OWNER__"]  = str(model_owner)
-    os.environ["__KV_INTERNAL_MODEL_NAME__"]   = str(model_name)
-    os.environ["__KV_INTERNAL_MODEL_PATH__"]   = str(model_path)
-
-    # client init - only if API key is provided
-    if api_key:
-        try:
-            from cryptotensors import client_init
-            client_init(
-                api_key=api_key,
-                model_owner=model_owner,
-                model_name=model_name,
-                model_path=model_path,
+        print(f"[koalavault] Initializing KoalaVault mode (key from {api_key_source})...", flush=True)
+        # Block trust-remote-code
+        forbidden = find_forbidden(vllm_args)
+        if forbidden:
+            print(
+                "[koalavault] Unsupported option(s) detected and blocked:\n  - "
+                + "\n  - ".join(forbidden)
+                + "\n[koalavault] This container **does not support trust-remote-code**. "
+                  "Please remove these options/env and retry.",
+                flush=True,
             )
-            print("[koalavault] Client initialized.", flush=True)
-        except Exception as e:
-            print(f"[koalavault] Client initialization failed: {e}", flush=True)
-            sys.exit(3)
-    else:
-        print("[koalavault] Skipping client initialization.", flush=True)
+            sys.exit(7)
+
+        # Parse combined model parameter in format "owner/model_name"
+        model_combined = get_arg(crypto_args, "koalavault-model")
+        if model_combined:
+            if "/" in model_combined:
+                model_owner, model_name = model_combined.split("/", 1)
+            else:
+                print(
+                    f"[koalavault] ERROR: Invalid model format: '{model_combined}'\n"
+                    f"[koalavault] Expected format: owner/model_name\n"
+                    f"[koalavault] Example: --koalavault-model producer/my-model",
+                    flush=True
+                )
+                sys.exit(2)
+        else:
+            model_owner = None
+            model_name = None
+        model_path  = get_arg(vllm_args, "model")
+
+        # Check required parameters
+        missing = []
+        if not model_owner or not model_name: missing.append("--koalavault-model <owner/model_name>")
+        if not model_path:  missing.append("--model <path>")
+        if missing:
+            print(
+                f"[koalavault] ERROR: Missing required parameters for KoalaVault mode:\n"
+                f"[koalavault]   {', '.join(missing)}\n"
+                f"[koalavault]\n"
+                f"[koalavault] Example usage:\n"
+                f"[koalavault]   --koalavault-api-key sk-your-api-key \\\n"
+                f"[koalavault]   --koalavault-model owner/model_name \\\n"
+                f"[koalavault]   --model /models/my-model (or meta-llama/Llama-3.2-1B)",
+                flush=True
+            )
+            sys.exit(2)
+
+        # Write back environment variables (using weird names to avoid conflicts)
+        os.environ["__KV_INTERNAL_API_KEY__"] = str(api_key)
+        os.environ["__KV_INTERNAL_MODEL_OWNER__"]  = str(model_owner)
+        os.environ["__KV_INTERNAL_MODEL_NAME__"]   = str(model_name)
+        os.environ["__KV_INTERNAL_MODEL_PATH__"]   = str(model_path)
 
     # ---- Start vLLM: force execution with python -m ----
     import runpy
+    import traceback
 
     mod = resolve_vllm_module()
 
     sys.argv = [mod] + vllm_args  # Simulate python -m <mod> <args...>
+    
     try:
         runpy.run_module(mod, run_name="__main__")
     except SystemExit as e:
@@ -165,6 +199,7 @@ def main():
         raise
     except Exception as e:
         print(f"[koalavault] Module execution failed: {e}", flush=True)
+        traceback.print_exc()
         sys.exit(6)
 
 
