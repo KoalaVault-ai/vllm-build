@@ -209,6 +209,7 @@ jobs:
           echo "[Stage 1] Architecture: ${ARCH}"
           
           docker buildx build \
+            --builder default \
             --platform "${PLATFORM}" \
             --file docker/Dockerfile.cpu \
             --target vllm-openai \
@@ -238,9 +239,11 @@ jobs:
           echo "[Stage 2] Target image: ${IMAGE_REF}"
           echo "[Stage 2] Platform: ${PLATFORM}"
           
+          # Use buildx with default builder to access local images from Stage 1
           if [ "$DRYRUN" = "true" ]; then
             echo "[Stage 2] Mode: DRY RUN (build only, no push)"
             docker buildx build \
+              --builder default \
               --platform "${PLATFORM}" \
               --file Dockerfile \
               --build-arg "BASE_IMAGE=${BASE_IMAGE_REF}" \
@@ -256,6 +259,7 @@ jobs:
           else
             echo "[Stage 2] Mode: RELEASE (build and push)"
             docker buildx build \
+              --builder default \
               --platform "${PLATFORM}" \
               --file Dockerfile \
               --build-arg "BASE_IMAGE=${BASE_IMAGE_REF}" \
@@ -324,8 +328,10 @@ jobs:
           echo "[Stage 3] Base image: ${{ steps.build.outputs.image_ref }}"
           mkdir -p ./measurements
           
-          # Stage 3: Build measurement image using Dockerfile.measure
+          # Stage 3: Build measurement image using Dockerfile.measure with buildx for export
+          # Note: Must use buildx for --output type=local
           docker buildx build \
+            --builder default \
             -f Dockerfile.measure \
             --build-arg BASE_IMAGE="${{ steps.build.outputs.image_ref }}" \
             --target export \
