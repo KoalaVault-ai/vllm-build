@@ -1,14 +1,19 @@
-name: Build and Release vLLM Container
+name: Build and Release vLLM CPU Container
 
 on:
   workflow_dispatch:
     inputs:
-      vllm_version:
-        description: "vLLM version (e.g., v0.9.2)"
+      vllm_tag:
+        description: "vLLM version tag (e.g., v0.9.2)"
         required: true
         type: string
+      dryrun:
+        description: "Dry run (build only, no push/register)"
+        required: false
+        default: false
+        type: boolean
       register_baseline:
-        description: "Register baseline to API"
+        description: "Register baseline to API (only if dryrun=false)"
         required: false
         default: false
         type: boolean
@@ -16,12 +21,16 @@ permissions:
   contents: read
 
 env:
-  DOCKERFILE: Dockerfile
+  VLLM_REPO: vllm-project/vllm
+  DOCKER_IMAGE_NAME: vllm-cpu
 
 jobs:
   build-and-measure:
-    name: Build, Measure and Register
+    name: Build vLLM CPU (${{ matrix.arch }})
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [x86, aarch64]
     steps:
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
@@ -34,10 +43,21 @@ jobs:
           docker-images: true
           swap-storage: false
       
-      - uses: actions/checkout@v4
+      - name: Checkout vllm-build repo (for packages)
+        uses: actions/checkout@v4
+        with:
+          path: vllm-build
+
+      - name: Checkout vLLM repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.VLLM_REPO }}
+          ref: ${{ github.event.inputs.vllm_tag }}
+          path: vllm
 
       - name: Read vLLM-Build version
         id: vllm_build_ver
+        working-directory: vllm-build
         run: |
           # Get version from git tag (prefer exact tag, fallback to describe)
           VLLM_BUILD_VERSION=$(git describe --tags --exact-match 2>/dev/null || git describe --tags --abbrev=0 2>/dev/null || echo "")
@@ -50,11 +70,19 @@ jobs:
           echo "vllm_build_version=$VLLM_BUILD_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Download cryptotensors packages
+        working-directory: vllm-build
         env:
           GH_TOKEN: ${{ secrets.KOALAVAULT_TOKEN }}
         run: |
-          # Architecture is fixed to x86_64
-          WHEEL_ARCH="x86_64"
+          # Map architecture to wheel naming convention
+          ARCH="${{ matrix.arch }}"
+          if [ "$ARCH" = "x86" ]; then
+            WHEEL_ARCH="x86_64"
+          elif [ "$ARCH" = "aarch64" ]; then
+            WHEEL_ARCH="aarch64"
+          else
+            WHEEL_ARCH="$ARCH"
+          fi
           
           echo "Downloading packages for architecture: $WHEEL_ARCH"
           
@@ -85,6 +113,7 @@ jobs:
 
       - name: Extract CryptoTensors version
         id: crypto_version
+        working-directory: vllm-build
         run: |
           # Extract version from cryptotensors wheel filename
           # e.g., cryptotensors-0.1.0-cp38-abi3-manylinux_2_28_x86_64.whl -> v0.1.0
@@ -95,24 +124,31 @@ jobs:
           echo "CryptoTensors version: $CRYPTO_VERSION"
           echo "CryptoTensors wheel: $CRYPTO_WHL"
 
+      - name: Copy packages to vLLM build directory
+        run: |
+          cp vllm-build/*.whl vllm/
+          echo "Copied packages to vLLM directory:"
+          ls -lh vllm/*.whl
+
       - name: Determine build metadata
         id: meta
         run: |
           set -euo pipefail
           
-          # Build base image from version input
-          VLLM_VERSION="${{ github.event.inputs.vllm_version }}"
-          BASE_IMAGE="vllm/vllm-openai:${VLLM_VERSION}"
-          IMAGE_NAME="vllm-openai"
-          
-          echo "base_image=$BASE_IMAGE" >> "$GITHUB_OUTPUT"
-          echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
-          echo "vllm_version=$VLLM_VERSION" >> "$GITHUB_OUTPUT"
-          
+          VLLM_TAG="${{ github.event.inputs.vllm_tag }}"
           PLATFORM_OS="linux"
-          ARCH="x86"
-          DOCKER_ARCH="amd64"
+          ARCH="${{ matrix.arch }}"
           
+          # Map architecture to Docker platform
+          if [ "$ARCH" = "x86" ]; then
+            DOCKER_ARCH="amd64"
+          elif [ "$ARCH" = "aarch64" ]; then
+            DOCKER_ARCH="arm64"
+          else
+            DOCKER_ARCH="$ARCH"
+          fi
+          
+          echo "vllm_version=$VLLM_TAG" >> "$GITHUB_OUTPUT"
           echo "platform_os=$PLATFORM_OS" >> "$GITHUB_OUTPUT"
           echo "arch=$ARCH" >> "$GITHUB_OUTPUT"
           echo "docker_arch=$DOCKER_ARCH" >> "$GITHUB_OUTPUT"
@@ -125,11 +161,8 @@ jobs:
           VLLM_BUILD_VERSION="${{ steps.vllm_build_ver.outputs.vllm_build_version }}"
           echo "vllm_build_version=$VLLM_BUILD_VERSION" >> "$GITHUB_OUTPUT"
 
-          # Platform is always CUDA for vllm-openai
-          PLATFORM_SUFFIX="cuda"
-          
-          # Build framework version: vllm-{version}-{arch}-{cuda}-{os}-build-{vllm-build-ver}-cryptotensors-{crypto-ver}
-          FRAMEWORK_VERSION="vllm-${VLLM_VERSION}-${ARCH}-${PLATFORM_SUFFIX}-${PLATFORM_OS}-build-${VLLM_BUILD_VERSION}-cryptotensors-${CRYPTO_VERSION}"
+          # Build framework version: vllm-{version}-{arch}-cpu-{os}-build-{vllm-build-ver}-cryptotensors-{crypto-ver}
+          FRAMEWORK_VERSION="vllm-${VLLM_TAG}-${ARCH}-cpu-${PLATFORM_OS}-build-${VLLM_BUILD_VERSION}-cryptotensors-${CRYPTO_VERSION}"
           echo "framework_version=$FRAMEWORK_VERSION" >> "$GITHUB_OUTPUT"
 
           # Get current build date (YYYY-MM-DD format)
@@ -137,13 +170,11 @@ jobs:
           echo "build_date=$BUILD_DATE" >> "$GITHUB_OUTPUT"
 
           echo "=== Build Metadata ==="
-          echo "Base Image: $BASE_IMAGE"
-          echo "Image Name: $IMAGE_NAME"
           echo "Arch: $ARCH"
           echo "Docker Arch: $DOCKER_ARCH"
-          echo "Platform: $PLATFORM_SUFFIX"
+          echo "Platform: cpu"
           echo "OS: $PLATFORM_OS"
-          echo "vLLM Version: $VLLM_VERSION"
+          echo "vLLM Version: $VLLM_TAG"
           echo "vLLM-Build Version: $VLLM_BUILD_VERSION"
           echo "CryptoTensors Version: $CRYPTO_VERSION"
           echo "Framework Version: $FRAMEWORK_VERSION"
@@ -152,125 +183,128 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Login Docker Hub
+        if: ${{ github.event.inputs.dryrun != 'true' }}
         uses: docker/login-action@v3
         with:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build application image
+      - name: Build vLLM CPU image
         id: build
+        working-directory: vllm
         run: |
           set -euo pipefail
-          IMAGE_NAME="${{ steps.meta.outputs.image_name }}"
           TAG="${{ steps.meta.outputs.vllm_version }}"
           PLATFORM="${{ steps.meta.outputs.platform_os }}/${{ steps.meta.outputs.docker_arch }}"
-          IMAGE_REF="${{ vars.DOCKERHUB_USERNAME }}/${IMAGE_NAME}:${TAG}"
+          IMAGE_REF="${{ vars.DOCKERHUB_USERNAME }}/${{ env.DOCKER_IMAGE_NAME }}:${TAG}"
+          DRYRUN="${{ github.event.inputs.dryrun }}"
+          ARCH="${{ steps.meta.outputs.arch }}"
           echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
 
-          # Build application image
-          echo "[Stage 1] Building from base image: ${{ steps.meta.outputs.base_image }}"
+          # Build vLLM CPU image from source
+          echo "[Stage 1] Building vLLM CPU from source: ${{ github.event.inputs.vllm_tag }}"
           echo "[Stage 1] Target image: ${IMAGE_REF}"
           echo "[Stage 1] Platform: ${PLATFORM}"
-          echo "[Stage 1] Architecture: ${{ steps.meta.outputs.arch }}"
+          echo "[Stage 1] Architecture: ${ARCH}"
           
-          docker buildx build \
-            --platform "${PLATFORM}" \
-            --file "${{ env.DOCKERFILE }}" \
-            --build-arg "BASE_IMAGE=${{ steps.meta.outputs.base_image }}" \
-            --build-arg "FRAMEWORK_VERSION=${{ steps.meta.outputs.framework_version }}" \
-            --build-arg "VLLM_VERSION=${{ steps.meta.outputs.vllm_version }}" \
-            --build-arg "VLLM_BUILD_VERSION=${{ steps.meta.outputs.vllm_build_version }}" \
-            --build-arg "CRYPTOTENSORS_VERSION=${{ steps.meta.outputs.cryptotensors_version }}" \
-            --build-arg "BUILD_DATE=${{ steps.meta.outputs.build_date }}" \
-            --tag "${IMAGE_REF}" \
-            --provenance=false \
-            --push \
-            .
+          if [ "$DRYRUN" = "true" ]; then
+            echo "[Stage 1] Mode: DRY RUN (build only, no push)"
+            docker buildx build \
+              --platform "${PLATFORM}" \
+              --file docker/Dockerfile.cpu \
+              --build-arg FRAMEWORK_VERSION="${{ steps.meta.outputs.framework_version }}" \
+              --build-arg VLLM_VERSION="${{ steps.meta.outputs.vllm_version }}" \
+              --build-arg VLLM_BUILD_VERSION="${{ steps.meta.outputs.vllm_build_version }}" \
+              --build-arg CRYPTOTENSORS_VERSION="${{ steps.meta.outputs.cryptotensors_version }}" \
+              --build-arg BUILD_DATE="${{ steps.meta.outputs.build_date }}" \
+              --tag "${IMAGE_REF}" \
+              --provenance=false \
+              --load \
+              .
+          else
+            echo "[Stage 1] Mode: RELEASE (build and push)"
+            docker buildx build \
+              --platform "${PLATFORM}" \
+              --file docker/Dockerfile.cpu \
+              --build-arg FRAMEWORK_VERSION="${{ steps.meta.outputs.framework_version }}" \
+              --build-arg VLLM_VERSION="${{ steps.meta.outputs.vllm_version }}" \
+              --build-arg VLLM_BUILD_VERSION="${{ steps.meta.outputs.vllm_build_version }}" \
+              --build-arg CRYPTOTENSORS_VERSION="${{ steps.meta.outputs.cryptotensors_version }}" \
+              --build-arg BUILD_DATE="${{ steps.meta.outputs.build_date }}" \
+              --tag "${IMAGE_REF}" \
+              --provenance=false \
+              --push \
+              .
+          fi
 
       - name: Print build summary
         run: |
-          echo "✓ Build Complete: Application Image Built and Pushed"
+          DRYRUN="${{ github.event.inputs.dryrun }}"
+          if [ "$DRYRUN" = "true" ]; then
+            echo "✓ Build Complete: vLLM CPU Image Built (DRY RUN - not pushed)"
+          else
+            echo "✓ Build Complete: vLLM CPU Image Built and Pushed"
+          fi
           echo "Image: ${{ steps.build.outputs.image_ref }}"
-          echo "Image Name: ${{ steps.meta.outputs.image_name }}"
-          echo "Platform: ${{ steps.meta.outputs.platform_os }}/${{ steps.meta.outputs.arch }}"
-          echo "vLLM Version: ${{ steps.meta.outputs.vllm_version }}"
-          echo "vLLM-Build Version: ${{ steps.meta.outputs.vllm_build_version }}"
-          echo "CryptoTensors Version: ${{ steps.meta.outputs.cryptotensors_version }}"
           echo "Framework Version: ${{ steps.meta.outputs.framework_version }}"
 
-      - name: Determine hash-builder architecture
-        id: hash_arch
+      - name: Download hash-builder
+        working-directory: vllm-build
+        env:
+          GH_TOKEN: ${{ secrets.KOALAVAULT_TOKEN }}
         run: |
-          # Architecture is fixed to x86_64
-          HASH_ARCH="x86_64"
-          echo "hash_arch=$HASH_ARCH" >> "$GITHUB_OUTPUT"
-          echo "Hash-builder architecture: linux-${HASH_ARCH}"
-
-      - name: Download hash-builder binary
-        uses: robinraju/release-downloader@v1
-        with:
-          repository: koalavault/cryptotensors
-          latest: true
-          fileName: hash-builder-linux-${{ steps.hash_arch.outputs.hash_arch }}
-          token: ${{ secrets.KOALAVAULT_TOKEN }}
+          echo "[Stage 2] Downloading hash-builder"
           
-      - name: Prepare hash-builder
-        run: |
-          mv hash-builder-linux-${{ steps.hash_arch.outputs.hash_arch }} hash-builder
+          # Clean up any existing hash-builder files
+          rm -f hash-builder 2>/dev/null || true
+          
+          # Map architecture to binary naming convention
+          ARCH="${{ matrix.arch }}"
+          if [ "$ARCH" = "x86" ]; then
+            BINARY_ARCH="x86_64"
+          elif [ "$ARCH" = "aarch64" ]; then
+            BINARY_ARCH="aarch64"
+          else
+            BINARY_ARCH="$ARCH"
+          fi
+          
+          # Download hash-builder binary
+          gh release download --repo koalavault/cryptotensors --pattern "hash-builder-${BINARY_ARCH}"
+          
+          # Rename and make executable
+          mv hash-builder-${BINARY_ARCH} hash-builder
           chmod +x hash-builder
+          
+          echo "Hash-builder downloaded:"
+          ls -lh hash-builder
+          ./hash-builder --version || echo "Hash-builder ready"
 
-      - name: Build measurement image and extract hash
+      - name: Measure baseline
         id: measure
+        working-directory: vllm-build
         run: |
           set -euo pipefail
+          echo "[Stage 2] Measuring baseline for ${{ steps.build.outputs.image_ref }}"
           
-          echo "Building measurement image with BuildKit export"
-          echo "Base image: ${{ steps.build.outputs.image_ref }}"
-          mkdir -p ./measurements
+          BASELINE_HASH=$(./hash-builder measure --image "${{ steps.build.outputs.image_ref }}")
           
-          docker buildx build \
-            -f Dockerfile.measure \
-            --build-arg BASE_IMAGE="${{ steps.build.outputs.image_ref }}" \
-            --target export \
-            --output type=local,dest=./measurements \
-            .
-          
-          echo "Measurement file extracted to ./measurements/"
-          ls -la ./measurements/
-          
-          if [[ ! -f "./measurements/baseline_hash.txt" ]]; then
-            echo "::error::baseline_hash.txt not found in measurements output"
+          if [ -z "$BASELINE_HASH" ]; then
+            echo "::error::Failed to measure baseline - no hash returned"
             exit 1
           fi
           
-          MEAS_HASH="$(cat ./measurements/baseline_hash.txt | tr -d '\n')"
-          if [[ -z "$MEAS_HASH" ]]; then
-            echo "::error::measurement_hash is empty in baseline_hash.txt"
-            exit 1
-          fi
-          
-          echo "measurement_hash=$MEAS_HASH" >> "$GITHUB_OUTPUT"
-          echo "Measurement hash: $MEAS_HASH"
-
-      - name: Print baseline information
-        run: |
-          echo "✓ Baseline Measured Successfully"
-          echo "=== Baseline Information ==="
-          echo "Framework Version: ${{ steps.meta.outputs.framework_version }}"
-          echo "Measurement Hash: ${{ steps.measure.outputs.measurement_hash }}"
-          echo "Framework Type: vllm"
-          echo "Image: ${{ steps.build.outputs.image_ref }}"
-          echo "================================"
+          echo "baseline_hash=$BASELINE_HASH" >> "$GITHUB_OUTPUT"
+          echo "[Stage 2] Baseline hash: $BASELINE_HASH"
 
       - name: Register baseline to API
-        if: ${{ github.event.inputs.register_baseline == 'true' && vars.KOALAVAULT_API_BASE_URL != '' }}
+        if: ${{ github.event.inputs.dryrun != 'true' && github.event.inputs.register_baseline == 'true' }}
+        working-directory: vllm-build
         run: |
           set -euo pipefail
-          
           echo "[info] Registering baseline to API..."
           
-          BASELINE_HASH="${{ steps.measure.outputs.measurement_hash }}"
           FRAMEWORK_VERSION="${{ steps.meta.outputs.framework_version }}"
+          BASELINE_HASH="${{ steps.measure.outputs.baseline_hash }}"
           VLLM_VERSION="${{ steps.meta.outputs.vllm_version }}"
           VLLM_BUILD_VERSION="${{ steps.meta.outputs.vllm_build_version }}"
           CRYPTOTENSORS_VERSION="${{ steps.meta.outputs.cryptotensors_version }}"
@@ -341,3 +375,26 @@ jobs:
             echo "$RESPONSE"
             exit 1
           fi
+
+      - name: Final summary
+        run: |
+          echo "=========================================="
+          echo "Build and Measurement Complete"
+          echo "=========================================="
+          echo "vLLM Version: ${{ steps.meta.outputs.vllm_version }}"
+          echo "Docker Image: ${{ steps.build.outputs.image_ref }}"
+          echo "Framework Version: ${{ steps.meta.outputs.framework_version }}"
+          echo "Baseline Hash: ${{ steps.measure.outputs.baseline_hash }}"
+          echo "Build Date: ${{ steps.meta.outputs.build_date }}"
+          echo "=========================================="
+          if [ "${{ github.event.inputs.dryrun }}" = "true" ]; then
+            echo "Mode: DRY RUN (image built but not pushed)"
+          else
+            echo "Mode: RELEASE (image pushed to Docker Hub)"
+            if [ "${{ github.event.inputs.register_baseline }}" = "true" ]; then
+              echo "Baseline: Registered to API"
+            else
+              echo "Baseline: Not registered (register_baseline=false)"
+            fi
+          fi
+
