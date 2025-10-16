@@ -17,14 +17,14 @@ echo "========================================="
 echo "Building vLLM image from: $BASE_IMAGE"
 echo "========================================="
 
-# Get vLLM-Build version from git tag
-VLLM_BUILD_VERSION=$(git describe --tags --exact-match 2>/dev/null)
+# Get vLLM-Build version from git tag or describe
+VLLM_BUILD_VERSION=$(git describe --tags --always 2>/dev/null)
 if [ -z "$VLLM_BUILD_VERSION" ]; then
-  echo "Error: No git tag found for current commit. Please create a tag first."
-  echo "Example: git tag v0.1.0 && git push origin v0.1.0"
-  exit 1
+  echo "Warning: No git tag found. Using 'dev' as version."
+  VLLM_BUILD_VERSION="dev"
+else
+  echo "vLLM-Build version from git: $VLLM_BUILD_VERSION"
 fi
-echo "vLLM-Build version from git: $VLLM_BUILD_VERSION"
 
 # Extract CryptoTensors version from wheel filename
 CRYPTO_WHL=$(ls cryptotensors-*.whl 2>/dev/null | head -1)
