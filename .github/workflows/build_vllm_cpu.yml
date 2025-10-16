@@ -268,11 +268,11 @@ jobs:
             BINARY_ARCH="$ARCH"
           fi
           
-          # Download hash-builder binary
-          gh release download --repo koalavault/cryptotensors --pattern "hash-builder-${BINARY_ARCH}"
+          # Download hash-builder binary (with linux- prefix)
+          gh release download --repo koalavault/cryptotensors --pattern "hash-builder-linux-${BINARY_ARCH}"
           
           # Rename and make executable
-          mv hash-builder-${BINARY_ARCH} hash-builder
+          mv hash-builder-linux-${BINARY_ARCH} hash-builder
           chmod +x hash-builder
           
           echo "Hash-builder downloaded:"
