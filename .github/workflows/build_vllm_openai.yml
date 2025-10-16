@@ -1,4 +1,4 @@
-name: Build vLLM Container and Push to Docker Hub
+name: Build and Release vLLM Container
 
 on:
   workflow_dispatch:
@@ -18,8 +18,13 @@ on:
         required: false
         default: "amd64"
         type: string
+      dryrun:
+        description: "Dry run (build only, no push/register)"
+        required: false
+        default: false
+        type: boolean
       register_baseline:
-        description: "Register baseline to API (true/false)"
+        description: "Register baseline to API (only if dryrun=false)"
         required: false
         default: false
         type: boolean
@@ -136,12 +141,13 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - name: Login Docker Hub
+        if: ${{ github.event.inputs.dryrun != 'true' }}
         uses: docker/login-action@v3
         with:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push application image
+      - name: Build application image
         id: build
         run: |
           set -euo pipefail
@@ -149,29 +155,53 @@ jobs:
           TAG="${{ steps.meta.outputs.image_tag }}"
           PLATFORM="${{ steps.meta.outputs.platform_os }}/${{ steps.meta.outputs.arch }}"
           IMAGE_REF="${{ vars.DOCKERHUB_USERNAME }}/${IMAGE_NAME}:${TAG}"
+          DRYRUN="${{ github.event.inputs.dryrun }}"
           echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
 
-          # Build and push application image
+          # Build application image
           echo "[Stage 1] Building from base image: ${{ steps.meta.outputs.base_image }}"
           echo "[Stage 1] Target image: ${IMAGE_REF}"
           echo "[Stage 1] Platform: ${PLATFORM}"
-          docker buildx build \
-            --platform "${PLATFORM}" \
-            --file "${{ env.DOCKERFILE }}" \
-            --build-arg "BASE_IMAGE=${{ steps.meta.outputs.base_image }}" \
-            --build-arg "FRAMEWORK_VERSION=${{ steps.meta.outputs.framework_version }}" \
-            --build-arg "VLLM_VERSION=${{ steps.meta.outputs.vllm_version }}" \
-            --build-arg "VLLM_BUILD_VERSION=${{ steps.meta.outputs.vllm_build_version }}" \
-            --build-arg "CRYPTOTENSORS_VERSION=${{ steps.meta.outputs.cryptotensors_version }}" \
-            --build-arg "BUILD_DATE=${{ steps.meta.outputs.build_date }}" \
-            --tag "${IMAGE_REF}" \
-            --provenance=false \
-            --push \
-            .
+          if [ "$DRYRUN" = "true" ]; then
+            echo "[Stage 1] Mode: DRY RUN (build only, no push)"
+            docker buildx build \
+              --platform "${PLATFORM}" \
+              --file "${{ env.DOCKERFILE }}" \
+              --build-arg "BASE_IMAGE=${{ steps.meta.outputs.base_image }}" \
+              --build-arg "FRAMEWORK_VERSION=${{ steps.meta.outputs.framework_version }}" \
+              --build-arg "VLLM_VERSION=${{ steps.meta.outputs.vllm_version }}" \
+              --build-arg "VLLM_BUILD_VERSION=${{ steps.meta.outputs.vllm_build_version }}" \
+              --build-arg "CRYPTOTENSORS_VERSION=${{ steps.meta.outputs.cryptotensors_version }}" \
+              --build-arg "BUILD_DATE=${{ steps.meta.outputs.build_date }}" \
+              --tag "${IMAGE_REF}" \
+              --provenance=false \
+              --load \
+              .
+          else
+            echo "[Stage 1] Mode: RELEASE (build and push)"
+            docker buildx build \
+              --platform "${PLATFORM}" \
+              --file "${{ env.DOCKERFILE }}" \
+              --build-arg "BASE_IMAGE=${{ steps.meta.outputs.base_image }}" \
+              --build-arg "FRAMEWORK_VERSION=${{ steps.meta.outputs.framework_version }}" \
+              --build-arg "VLLM_VERSION=${{ steps.meta.outputs.vllm_version }}" \
+              --build-arg "VLLM_BUILD_VERSION=${{ steps.meta.outputs.vllm_build_version }}" \
+              --build-arg "CRYPTOTENSORS_VERSION=${{ steps.meta.outputs.cryptotensors_version }}" \
+              --build-arg "BUILD_DATE=${{ steps.meta.outputs.build_date }}" \
+              --tag "${IMAGE_REF}" \
+              --provenance=false \
+              --push \
+              .
+          fi
 
       - name: Print build summary
         run: |
-          echo "✓ Build Complete: Application Image Built and Pushed"
+          DRYRUN="${{ github.event.inputs.dryrun }}"
+          if [ "$DRYRUN" = "true" ]; then
+            echo "✓ Build Complete: Application Image Built (DRY RUN - not pushed)"
+          else
+            echo "✓ Build Complete: Application Image Built and Pushed"
+          fi
           echo "Image: ${{ steps.build.outputs.image_ref }}"
           echo "Image Name: ${{ steps.meta.outputs.image_name }}"
           echo "Platform: ${{ steps.meta.outputs.platform_os }}/${{ steps.meta.outputs.arch }}"
@@ -179,6 +209,7 @@ jobs:
           echo "vLLM-Build Version: ${{ steps.meta.outputs.vllm_build_version }}"
           echo "CryptoTensors Version: ${{ steps.meta.outputs.cryptotensors_version }}"
           echo "Framework Version: ${{ steps.meta.outputs.framework_version }}"
+          echo "Dry Run: $DRYRUN"
 
       - name: Determine hash-builder architecture
         id: hash_arch
@@ -252,7 +283,7 @@ jobs:
           echo "================================"
 
       - name: Register baseline to API
-        if: ${{ github.event.inputs.register_baseline == 'true' && vars.KOALAVAULT_API_BASE_URL != '' }}
+        if: ${{ github.event.inputs.dryrun != 'true' && github.event.inputs.register_baseline == 'true' && vars.KOALAVAULT_API_BASE_URL != '' }}
         run: |
           set -euo pipefail
           
