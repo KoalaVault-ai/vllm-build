@@ -1,0 +1,123 @@
+name: Test Register Baseline
+
+on:
+  workflow_dispatch:
+    inputs:
+      framework_version:
+        description: "Framework version (e.g., vllm-v0.9.2-amd64-cuda-linux-build-v0.1.0-cryptotensors-v0.0.3)"
+        required: true
+        type: string
+      baseline_hash:
+        description: "Baseline hash (64-char SHA256)"
+        required: true
+        type: string
+      vllm_version:
+        description: "vLLM version tag (e.g., v0.9.2)"
+        required: true
+        type: string
+      vllm_build_version:
+        description: "vLLM-Build version (e.g., v0.1.0)"
+        required: false
+        default: "v0.1.0"
+        type: string
+      cryptotensors_version:
+        description: "CryptoTensors version (e.g., v0.0.3)"
+        required: false
+        default: "v0.0.3"
+        type: string
+
+jobs:
+  register-baseline:
+    name: Register Framework Baseline
+    runs-on: ubuntu-latest
+    steps:
+      - name: Register baseline to API
+        run: |
+          set -euo pipefail
+          
+          echo "[info] Registering baseline to API..."
+          
+          FRAMEWORK_VERSION="${{ github.event.inputs.framework_version }}"
+          BASELINE_HASH="${{ github.event.inputs.baseline_hash }}"
+          VLLM_VERSION="${{ github.event.inputs.vllm_version }}"
+          VLLM_BUILD_VERSION="${{ github.event.inputs.vllm_build_version }}"
+          CRYPTOTENSORS_VERSION="${{ github.event.inputs.cryptotensors_version }}"
+          BUILD_DATE=$(date -u +"%Y-%m-%d")
+          
+          # Build version.json as a JSON string (not object)
+          VERSION_JSON_STR=$(jq -n \
+            --arg fw "$FRAMEWORK_VERSION" \
+            --arg framework "vllm" \
+            --arg vllm "$VLLM_VERSION" \
+            --arg build "$VLLM_BUILD_VERSION" \
+            --arg crypto "$CRYPTOTENSORS_VERSION" \
+            --arg date "$BUILD_DATE" \
+            '{
+              framework_version: $fw,
+              framework: $framework,
+              vllm_version: $vllm,
+              vllm_build_version: $build,
+              cryptotensors_version: $crypto,
+              build_date: $date
+            }' | jq -c .)
+          
+          echo "[debug] Version JSON string: $VERSION_JSON_STR"
+          
+          # Build baseline data with description as JSON string
+          BASELINE_DATA=$(jq -n \
+            --arg fw "$FRAMEWORK_VERSION" \
+            --arg framework_type "vllm" \
+            --arg hash "$BASELINE_HASH" \
+            --arg desc "$VERSION_JSON_STR" \
+            --arg tag "$VLLM_VERSION" \
+            '{
+              framework_version: $fw,
+              framework_type: $framework_type,
+              baseline_hash: $hash,
+              description: $desc,
+              tag: $tag
+            }')
+          
+          echo "[debug] Baseline data:"
+          echo "$BASELINE_DATA" | jq .
+          
+          echo "[info] Getting admin JWT token..."
+          TOKEN_RESPONSE=$(curl -s -X POST "${{ vars.KOALAVAULT_API_BASE_URL }}/api/admin/api-key-login" \
+            -H "Content-Type: application/json" \
+            -d "{\"api_key\": \"${{ secrets.KOALAVAULT_ADMIN_API_KEY }}\"}")
+          
+          JWT_TOKEN=$(echo "$TOKEN_RESPONSE" | jq -r '.data.access_token // empty')
+          
+          if [ -z "$JWT_TOKEN" ] || [ "$JWT_TOKEN" = "null" ]; then
+            echo "::error::Failed to get JWT token"
+            echo "$TOKEN_RESPONSE" | jq . || echo "$TOKEN_RESPONSE"
+            exit 1
+          fi
+          
+          echo "[info] JWT token obtained successfully"
+          
+          echo "[info] Sending baseline registration request..."
+          RESPONSE=$(curl -s -X POST "${{ vars.KOALAVAULT_API_BASE_URL }}/api/admin/framework/baselines" \
+            -H "Authorization: Bearer $JWT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$BASELINE_DATA")
+          
+          echo "[info] Response:"
+          echo "$RESPONSE" | jq . || echo "$RESPONSE"
+          
+          if echo "$RESPONSE" | jq -e '.success' > /dev/null; then
+            BASELINE_ID=$(echo "$RESPONSE" | jq -r '.data.id')
+            echo "[success] ✓ Baseline registered successfully!"
+            echo "Baseline ID: $BASELINE_ID"
+            echo "Framework Version: $FRAMEWORK_VERSION"
+            echo "Baseline Hash: $BASELINE_HASH"
+            echo "Tag: $VLLM_VERSION"
+            echo ""
+            echo "Note: Baseline is registered but not activated."
+            echo "To activate: PUT /api/admin/framework/baselines/$BASELINE_ID/activate"
+            echo "            with body: {\"activate\": true}"
+          else
+            echo "::error::Failed to register baseline"
+            exit 1
+          fi
+

@@ -340,31 +340,41 @@ jobs:
           CRYPTOTENSORS_VERSION="${{ steps.meta.outputs.cryptotensors_version }}"
           BUILD_DATE="${{ steps.meta.outputs.build_date }}"
           
-          # Build complete version.json content for description
-          VERSION_JSON=$(cat <<EOF
-          {
-            "framework_version": "$FRAMEWORK_VERSION",
-            "framework": "vllm",
-            "vllm_version": "$VLLM_VERSION",
-            "vllm_build_version": "$VLLM_BUILD_VERSION",
-            "cryptotensors_version": "$CRYPTOTENSORS_VERSION",
-            "build_date": "$BUILD_DATE"
-          }
-          EOF
-          )
+          # Build version.json as a JSON string for description field
+          VERSION_JSON_STR=$(jq -n \
+            --arg fw "$FRAMEWORK_VERSION" \
+            --arg framework "vllm" \
+            --arg vllm "$VLLM_VERSION" \
+            --arg build "$VLLM_BUILD_VERSION" \
+            --arg crypto "$CRYPTOTENSORS_VERSION" \
+            --arg date "$BUILD_DATE" \
+            '{
+              framework_version: $fw,
+              framework: $framework,
+              vllm_version: $vllm,
+              vllm_build_version: $build,
+              cryptotensors_version: $crypto,
+              build_date: $date
+            }' | jq -c .)
           
-          BASELINE_DATA=$(cat <<EOF
-          {
-            "framework_version": "$FRAMEWORK_VERSION",
-            "framework_type": "vllm",
-            "baseline_hash": "$BASELINE_HASH",
-            "description": $(echo "$VERSION_JSON" | jq -c .),
-            "tag": "$VLLM_VERSION"
-          }
-          EOF
-          )
+          # Build baseline data with description as a string
+          BASELINE_DATA=$(jq -n \
+            --arg fw "$FRAMEWORK_VERSION" \
+            --arg framework_type "vllm" \
+            --arg hash "$BASELINE_HASH" \
+            --arg desc "$VERSION_JSON_STR" \
+            --arg tag "$VLLM_VERSION" \
+            '{
+              framework_version: $fw,
+              framework_type: $framework_type,
+              baseline_hash: $hash,
+              description: $desc,
+              tag: $tag
+            }')
           
           echo "[info] Registering baseline: $FRAMEWORK_VERSION with hash: $BASELINE_HASH"
+          echo "[debug] Baseline data:"
+          echo "$BASELINE_DATA" | jq .
           
           echo "[info] Getting admin JWT token..."
           TOKEN_RESPONSE=$(curl -s -X POST "${{ vars.KOALAVAULT_API_BASE_URL }}/api/admin/api-key-login" \
