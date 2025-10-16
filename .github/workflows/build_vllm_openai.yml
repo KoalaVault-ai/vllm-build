@@ -55,8 +55,8 @@ jobs:
       - name: Read vLLM-Build version
         id: vllm_build_ver
         run: |
-          # Get version from git tag or describe
-          VLLM_BUILD_VERSION=$(git describe --tags --always 2>/dev/null)
+          # Get version from git tag (prefer exact tag, fallback to describe)
+          VLLM_BUILD_VERSION=$(git describe --tags --exact-match 2>/dev/null || git describe --tags --abbrev=0 2>/dev/null || echo "")
           if [ -z "$VLLM_BUILD_VERSION" ]; then
             echo "::warning::No git tag found. Using 'dev' as version."
             VLLM_BUILD_VERSION="dev"
@@ -81,14 +81,20 @@ jobs:
           
           echo "Downloading packages for architecture: $WHEEL_ARCH"
           
-          # Download all wheel files from latest release
-          gh release download --repo koalavault/cryptotensors --pattern "*.whl" --skip-existing || true
+          # Clean up any existing wheel files first
+          rm -f *.whl 2>/dev/null || true
+          
+          # Download architecture-specific cryptotensors wheel only
+          gh release download --repo koalavault/cryptotensors --pattern "*manylinux*${WHEEL_ARCH}.whl"
+          
+          # Download safetensors wheel (platform-independent)
+          gh release download --repo koalavault/cryptotensors --pattern "safetensors-*.whl"
           
           # Verify required files exist
           if ! ls cryptotensors-*-manylinux_*_${WHEEL_ARCH}.whl 1> /dev/null 2>&1; then
             echo "::error::cryptotensors wheel for $WHEEL_ARCH not found"
             echo "Available files:"
-            ls -la *.whl || echo "No wheel files found"
+            ls -la *.whl 2>/dev/null || echo "No wheel files found"
             exit 1
           fi
           
