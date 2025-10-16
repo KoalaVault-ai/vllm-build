@@ -260,14 +260,31 @@ jobs:
           
           BASELINE_HASH="${{ steps.measure.outputs.measurement_hash }}"
           FRAMEWORK_VERSION="${{ steps.meta.outputs.framework_version }}"
+          VLLM_VERSION="${{ steps.meta.outputs.vllm_version }}"
+          VLLM_BUILD_VERSION="${{ steps.meta.outputs.vllm_build_version }}"
+          CRYPTOTENSORS_VERSION="${{ steps.meta.outputs.cryptotensors_version }}"
+          BUILD_DATE="${{ steps.meta.outputs.build_date }}"
+          
+          # Build complete version.json content for description
+          VERSION_JSON=$(cat <<EOF
+          {
+            "framework_version": "$FRAMEWORK_VERSION",
+            "framework": "vllm",
+            "vllm_version": "$VLLM_VERSION",
+            "vllm_build_version": "$VLLM_BUILD_VERSION",
+            "cryptotensors_version": "$CRYPTOTENSORS_VERSION",
+            "build_date": "$BUILD_DATE"
+          }
+          EOF
+          )
           
           BASELINE_DATA=$(cat <<EOF
           {
             "framework_version": "$FRAMEWORK_VERSION",
             "framework_type": "vllm",
             "baseline_hash": "$BASELINE_HASH",
-            "description": "vLLM framework baseline version $FRAMEWORK_VERSION",
-            "tag": "stable"
+            "description": $(echo "$VERSION_JSON" | jq -c .),
+            "tag": "$VLLM_VERSION"
           }
           EOF
           )
