@@ -55,25 +55,51 @@ jobs:
           echo "vllm_build_version=$VLLM_BUILD_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Download cryptotensors packages
-        uses: robinraju/release-downloader@v1
-        with:
-          repository: koalavault/cryptotensors
-          latest: true
-          fileName: |
-            safetensors-*.whl
-            cryptotensors-*-linux_*.whl
-          token: ${{ secrets.KOALAVAULT_TOKEN }}
+        env:
+          GH_TOKEN: ${{ secrets.KOALAVAULT_TOKEN }}
+        run: |
+          # Get architecture suffix for cryptotensors wheel
+          ARCH="${{ github.event.inputs.arch }}"
+          if [ "$ARCH" = "amd64" ]; then
+            WHEEL_ARCH="x86_64"
+          elif [ "$ARCH" = "arm64" ]; then
+            WHEEL_ARCH="aarch64"
+          else
+            WHEEL_ARCH="$ARCH"
+          fi
+          
+          echo "Downloading packages for architecture: $WHEEL_ARCH"
+          
+          # Download all wheel files from latest release
+          gh release download --repo koalavault/cryptotensors --pattern "*.whl" --skip-existing || true
+          
+          # Verify required files exist
+          if ! ls cryptotensors-*-manylinux_*_${WHEEL_ARCH}.whl 1> /dev/null 2>&1; then
+            echo "::error::cryptotensors wheel for $WHEEL_ARCH not found"
+            echo "Available files:"
+            ls -la *.whl || echo "No wheel files found"
+            exit 1
+          fi
+          
+          if ! ls safetensors-*.whl 1> /dev/null 2>&1; then
+            echo "::error::safetensors wheel not found"
+            exit 1
+          fi
+          
+          echo "Downloaded packages:"
+          ls -lh *.whl
 
       - name: Extract CryptoTensors version
         id: crypto_version
         run: |
           # Extract version from cryptotensors wheel filename
-          # e.g., cryptotensors-0.1.0-cp38-abi3-linux_x86_64.whl -> v0.1.0
-          CRYPTO_WHL=$(ls cryptotensors-*.whl | head -1)
+          # e.g., cryptotensors-0.1.0-cp38-abi3-manylinux_2_28_x86_64.whl -> v0.1.0
+          CRYPTO_WHL=$(ls cryptotensors-*-manylinux_*.whl | head -1)
           CRYPTO_VERSION=$(echo "$CRYPTO_WHL" | sed 's/cryptotensors-//' | sed 's/-cp.*//')
           CRYPTO_VERSION="v${CRYPTO_VERSION}"
           echo "cryptotensors_version=$CRYPTO_VERSION" >> "$GITHUB_OUTPUT"
           echo "CryptoTensors version: $CRYPTO_VERSION"
+          echo "CryptoTensors wheel: $CRYPTO_WHL"
 
       - name: Determine build metadata
         id: meta
