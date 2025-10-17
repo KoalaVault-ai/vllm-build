@@ -29,7 +29,11 @@ MANIFEST
 
 # Build artifacts
 hash-builder
+hash-builder-linux-*
 measurements/
+
+# macOS system files
+.DS_Store
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

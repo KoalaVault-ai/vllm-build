@@ -17,8 +17,8 @@ echo "========================================="
 echo "Building vLLM image from: $BASE_IMAGE"
 echo "========================================="
 
-# Get vLLM-Build version from git tag or describe
-VLLM_BUILD_VERSION=$(git describe --tags --always 2>/dev/null)
+# Get vLLM-Build version from git tag (only the tag, not commit distance)
+VLLM_BUILD_VERSION=$(git describe --tags --abbrev=0 2>/dev/null)
 if [ -z "$VLLM_BUILD_VERSION" ]; then
   echo "Warning: No git tag found. Using 'dev' as version."
   VLLM_BUILD_VERSION="dev"
