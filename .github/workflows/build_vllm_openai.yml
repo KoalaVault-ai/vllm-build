@@ -21,7 +21,7 @@ permissions:
 
 env:
   DOCKERFILE: Dockerfile
-  GHCR_IMAGE_REPO: ghcr.io/KoalaVault-ai/vllm-openai
+  GHCR_IMAGE_REPO: ghcr.io/koalavault-ai/vllm-openai
   DOCKERHUB_IMAGE_REPO: ${{ vars.DOCKERHUB_USERNAME }}/vllm-openai
 
 jobs:

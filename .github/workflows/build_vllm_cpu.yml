@@ -27,7 +27,7 @@ permissions:
 env:
   VLLM_REPO: vllm-project/vllm
   DOCKER_IMAGE_NAME: vllm-cpu
-  GHCR_IMAGE_REPO: ghcr.io/KoalaVault-ai/vllm-cpu
+  GHCR_IMAGE_REPO: ghcr.io/koalavault-ai/vllm-cpu
   DOCKERHUB_IMAGE_REPO: ${{ vars.DOCKERHUB_USERNAME }}/vllm-cpu
 
 jobs:
