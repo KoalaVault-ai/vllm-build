@@ -557,10 +557,19 @@ jobs:
           HB_FILENAME="hash-builder-${HB_VERSION}-linux-${BINARY_ARCH}-${LIBC}"
           
           echo "Downloading hash-builder: $HB_FILENAME from $CT_TAG"
-          gh release download "$CT_TAG" --repo KoalaVault-ai/cryptotensors --pattern "$HB_FILENAME"
           
-          # Rename and make executable
-          mv "$HB_FILENAME" hash-builder
+          # Try versioned filename first, fallback to non-versioned if not found
+          if gh release download "$CT_TAG" --repo KoalaVault-ai/cryptotensors --pattern "$HB_FILENAME" 2>/dev/null; then
+            echo "Downloaded versioned hash-builder: $HB_FILENAME"
+            mv "$HB_FILENAME" hash-builder
+          else
+            # Fallback: try without version (e.g., hash-builder--linux-x86_64-gnu)
+            HB_FILENAME_FALLBACK="hash-builder--linux-${BINARY_ARCH}-${LIBC}"
+            echo "Versioned file not found, trying: $HB_FILENAME_FALLBACK"
+            gh release download "$CT_TAG" --repo KoalaVault-ai/cryptotensors --pattern "$HB_FILENAME_FALLBACK"
+            mv "$HB_FILENAME_FALLBACK" hash-builder
+          fi
+          
           chmod +x hash-builder
           
           echo "Hash-builder downloaded:"
