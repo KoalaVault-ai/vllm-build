@@ -104,10 +104,11 @@ def main():
     
     # Create /tmp subdirectories (symlink targets)
     # These are the ONLY paths boot.py manages - everything else is in Dockerfile or user mounts
-    os.makedirs("/tmp/triton", exist_ok=True)
-    os.makedirs("/tmp/vllm", exist_ok=True)
-    os.makedirs("/tmp/torch", exist_ok=True)
-    os.makedirs("/tmp/flashinfer", exist_ok=True)
+    os.makedirs("/tmp/kv-triton", exist_ok=True)
+    os.makedirs("/tmp/kv-config", exist_ok=True)
+    os.makedirs("/tmp/kv-vllm", exist_ok=True)
+    os.makedirs("/tmp/kv-torch", exist_ok=True)
+    os.makedirs("/tmp/kv-flashinfer", exist_ok=True)
     
     argv = sys.argv[1:]
     crypto_args, vllm_args = split_args(argv)

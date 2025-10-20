@@ -49,10 +49,11 @@ COPY boot.py /opt/venv/lib/python3.12/site-packages/boot.py
 #   - /root/.cache/huggingface is a real directory (not symlink) for flexible mounting
 RUN mkdir -p /root/.cache/huggingface && \
     mkdir -p /tmp && \
-    ln -s /tmp/triton /root/.triton && \
-    ln -s /tmp/vllm /root/.cache/vllm && \
-    ln -s /tmp/torch /root/.cache/torch && \
-    ln -s /tmp/flashinfer /root/.cache/flashinfer
+    ln -s /tmp/kv-triton /root/.triton && \
+    ln -s /tmp/kv-config /root/.config && \
+    ln -s /tmp/kv-vllm /root/.cache/vllm && \
+    ln -s /tmp/kv-torch /root/.cache/torch && \
+    ln -s /tmp/kv-flashinfer /root/.cache/flashinfer
 
 WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/tini", "-g", "--", "python3", "/opt/venv/lib/python3.12/site-packages/boot.py"]
