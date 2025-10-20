@@ -45,7 +45,7 @@ jobs:
       matrix:
         arch: [x86, aarch64]
     steps:
-      - name: Determine trigger mode and vLLM version
+      - name: Determine trigger mode
         id: trigger
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
@@ -62,8 +62,41 @@ jobs:
               echo "Release tag detected, using release mode"
             fi
             
-            # Try to get vLLM version from tag message
-            TAG_MESSAGE=$(git tag -l --format='%(contents)' "$TAG_NAME" || echo "")
+            DRYRUN="false"
+            REGISTER_BASELINE="true"
+          else
+            # Manual workflow_dispatch trigger - always RC mode
+            BUILD_MODE="rc"
+            DRYRUN="${{ github.event.inputs.dryrun }}"
+            REGISTER_BASELINE="${{ github.event.inputs.register_baseline }}"
+            echo "Manual trigger - using RC mode"
+          fi
+          
+          echo "build_mode=$BUILD_MODE" >> "$GITHUB_OUTPUT"
+          echo "dryrun=$DRYRUN" >> "$GITHUB_OUTPUT"
+          echo "register_baseline=$REGISTER_BASELINE" >> "$GITHUB_OUTPUT"
+          
+          echo "=== Trigger Configuration ==="
+          echo "Build Mode: $BUILD_MODE"
+          echo "Dry Run: $DRYRUN"
+          echo "Register Baseline: $REGISTER_BASELINE"
+      
+      - name: Checkout vllm-build repo (for packages)
+        uses: actions/checkout@v4
+        with:
+          path: vllm-build
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Determine vLLM version from tag message or input
+        id: vllm_version
+        working-directory: vllm-build
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Tag push: try to get vLLM version from tag message
+            TAG_NAME="${{ github.ref_name }}"
+            TAG_MESSAGE=$(git tag -l --format='%(contents)' "$TAG_NAME" 2>/dev/null || echo "")
+            
             if [[ "$TAG_MESSAGE" =~ vllm:\ *(v[0-9]+\.[0-9]+\.[0-9]+) ]]; then
               VLLM_TAG="${BASH_REMATCH[1]}"
               echo "vLLM version from tag message: $VLLM_TAG"
@@ -71,32 +104,36 @@ jobs:
               echo "No vLLM version in tag message, will use vllm_versions file"
               VLLM_TAG=""
             fi
-            
-            DRYRUN="false"
-            REGISTER_BASELINE="true"
           else
-            # Manual workflow_dispatch trigger - always RC mode
-            BUILD_MODE="rc"
+            # Manual trigger: use input
             VLLM_TAG="${{ github.event.inputs.vllm_tag }}"
-            DRYRUN="${{ github.event.inputs.dryrun }}"
-            REGISTER_BASELINE="${{ github.event.inputs.register_baseline }}"
-            echo "Manual trigger - using RC mode"
-            if [ -z "$VLLM_TAG" ]; then
-              echo "No vLLM version provided, will use vllm_versions file"
+            if [ -n "$VLLM_TAG" ]; then
+              echo "vLLM version from input: $VLLM_TAG"
+            else
+              echo "No vLLM version in input, will use vllm_versions file"
             fi
           fi
           
-          echo "build_mode=$BUILD_MODE" >> "$GITHUB_OUTPUT"
-          echo "vllm_tag=$VLLM_TAG" >> "$GITHUB_OUTPUT"
-          echo "dryrun=$DRYRUN" >> "$GITHUB_OUTPUT"
-          echo "register_baseline=$REGISTER_BASELINE" >> "$GITHUB_OUTPUT"
+          # If still empty, read from vllm_versions file
+          if [ -z "$VLLM_TAG" ]; then
+            VLLM_TAG=$(grep -v '^#' vllm_versions | grep -v '^$' | head -1 | tr -d '[:space:]')
+            if [ -z "$VLLM_TAG" ]; then
+              echo "::error::No vLLM version found in vllm_versions file"
+              exit 1
+            fi
+            echo "Using vLLM version from vllm_versions file: $VLLM_TAG"
+          fi
           
-          echo "=== Trigger Configuration ==="
-          echo "Build Mode: $BUILD_MODE"
-          echo "vLLM Tag: $VLLM_TAG"
-          echo "Dry Run: $DRYRUN"
-          echo "Register Baseline: $REGISTER_BASELINE"
-      
+          echo "vllm_tag=$VLLM_TAG" >> "$GITHUB_OUTPUT"
+          echo "Final vLLM version: $VLLM_TAG"
+
+      - name: Checkout vLLM repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.VLLM_REPO }}
+          ref: ${{ steps.vllm_version.outputs.vllm_tag }}
+          path: vllm
+
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -107,40 +144,6 @@ jobs:
           large-packages: true
           docker-images: true
           swap-storage: false
-      
-      - name: Checkout vllm-build repo (for packages)
-        uses: actions/checkout@v4
-        with:
-          path: vllm-build
-          fetch-depth: 0
-          fetch-tags: true
-
-      - name: Determine final vLLM version
-        id: vllm_version
-        working-directory: vllm-build
-        run: |
-          VLLM_TAG="${{ steps.trigger.outputs.vllm_tag }}"
-          
-          if [ -z "$VLLM_TAG" ]; then
-            # Read from vllm_versions file (first non-comment, non-empty line)
-            VLLM_TAG=$(grep -v '^#' vllm_versions | grep -v '^$' | head -1 | tr -d '[:space:]')
-            if [ -z "$VLLM_TAG" ]; then
-              echo "::error::No vLLM version found in vllm_versions file"
-              exit 1
-            fi
-            echo "Using vLLM version from vllm_versions file: $VLLM_TAG"
-          else
-            echo "Using vLLM version from input/tag: $VLLM_TAG"
-          fi
-          
-          echo "vllm_tag=$VLLM_TAG" >> "$GITHUB_OUTPUT"
-
-      - name: Checkout vLLM repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.VLLM_REPO }}
-          ref: ${{ steps.vllm_version.outputs.vllm_tag }}
-          path: vllm
 
       - name: Determine vLLM-Build version
         id: vllm_build_ver
