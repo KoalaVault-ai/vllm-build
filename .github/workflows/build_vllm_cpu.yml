@@ -529,23 +529,38 @@ jobs:
           echo "[Stage 2] Downloading hash-builder"
           
           # Clean up any existing hash-builder files
-          rm -f hash-builder 2>/dev/null || true
+          rm -f hash-builder* 2>/dev/null || true
           
           # Map architecture to binary naming convention
           ARCH="${{ matrix.arch }}"
           if [ "$ARCH" = "x86" ]; then
             BINARY_ARCH="x86_64"
+            LIBC="gnu"
           elif [ "$ARCH" = "aarch64" ]; then
             BINARY_ARCH="aarch64"
+            LIBC="musl"
           else
-            BINARY_ARCH="$ARCH"
+            echo "::error::Unsupported architecture: $ARCH"
+            exit 1
           fi
           
-          # Download hash-builder binary (with linux- prefix)
-          gh release download --repo KoalaVault-ai/cryptotensors --pattern "hash-builder-linux-${BINARY_ARCH}"
+          # Get CryptoTensors version and tag for hash-builder
+          CT_TAG="${{ steps.ct_tag.outputs.cryptotensors_tag }}"
+          CT_VERSION_FULL="${{ steps.ct_tag.outputs.ct_version_full }}"
+          
+          # Remove 'v' prefix from version for hash-builder filename
+          HB_VERSION="${CT_VERSION_FULL#v}"
+          
+          # Build hash-builder filename based on version format
+          # RC: hash-builder-0.1.0-rc.1-linux-x86_64-gnu
+          # Release: hash-builder-0.1.0-linux-x86_64-gnu
+          HB_FILENAME="hash-builder-${HB_VERSION}-linux-${BINARY_ARCH}-${LIBC}"
+          
+          echo "Downloading hash-builder: $HB_FILENAME from $CT_TAG"
+          gh release download "$CT_TAG" --repo KoalaVault-ai/cryptotensors --pattern "$HB_FILENAME"
           
           # Rename and make executable
-          mv hash-builder-linux-${BINARY_ARCH} hash-builder
+          mv "$HB_FILENAME" hash-builder
           chmod +x hash-builder
           
           echo "Hash-builder downloaded:"

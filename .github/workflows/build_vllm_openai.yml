@@ -380,26 +380,41 @@ jobs:
           echo "CryptoTensors Version: ${{ steps.meta.outputs.ct_version_full }}"
           echo "Framework Version: ${{ steps.meta.outputs.framework_version }}"
 
-      - name: Determine hash-builder architecture
-        id: hash_arch
-        run: |
-          # Architecture is fixed to x86_64
-          HASH_ARCH="x86_64"
-          echo "hash_arch=$HASH_ARCH" >> "$GITHUB_OUTPUT"
-          echo "Hash-builder architecture: linux-${HASH_ARCH}"
-
       - name: Download hash-builder binary
-        uses: robinraju/release-downloader@v1
-        with:
-          repository: KoalaVault-ai/cryptotensors
-          latest: true
-          fileName: hash-builder-linux-${{ steps.hash_arch.outputs.hash_arch }}
-          token: ${{ secrets.KOALAVAULT_TOKEN }}
-          
-      - name: Prepare hash-builder
+        env:
+          GH_TOKEN: ${{ secrets.KOALAVAULT_TOKEN }}
         run: |
-          mv hash-builder-linux-${{ steps.hash_arch.outputs.hash_arch }} hash-builder
+          echo "Downloading hash-builder"
+          
+          # Clean up any existing hash-builder files
+          rm -f hash-builder* 2>/dev/null || true
+          
+          # Architecture is fixed to x86_64 for OpenAI (CUDA)
+          BINARY_ARCH="x86_64"
+          LIBC="gnu"
+          
+          # Get CryptoTensors version and tag for hash-builder
+          CT_TAG="${{ steps.ct_tag.outputs.cryptotensors_tag }}"
+          CT_VERSION_FULL="${{ steps.ct_tag.outputs.ct_version_full }}"
+          
+          # Remove 'v' prefix from version for hash-builder filename
+          HB_VERSION="${CT_VERSION_FULL#v}"
+          
+          # Build hash-builder filename based on version format
+          # RC: hash-builder-0.1.0-rc.1-linux-x86_64-gnu
+          # Release: hash-builder-0.1.0-linux-x86_64-gnu
+          HB_FILENAME="hash-builder-${HB_VERSION}-linux-${BINARY_ARCH}-${LIBC}"
+          
+          echo "Downloading hash-builder: $HB_FILENAME from $CT_TAG"
+          gh release download "$CT_TAG" --repo KoalaVault-ai/cryptotensors --pattern "$HB_FILENAME"
+          
+          # Rename and make executable
+          mv "$HB_FILENAME" hash-builder
           chmod +x hash-builder
+          
+          echo "Hash-builder downloaded:"
+          ls -lh hash-builder
+          ./hash-builder --version || echo "Hash-builder ready"
 
       - name: Build measurement image and extract hash
         id: measure
