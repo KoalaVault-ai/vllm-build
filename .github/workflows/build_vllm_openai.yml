@@ -125,10 +125,12 @@ jobs:
       - name: Determine vLLM-Build version
         id: vllm_build_ver
         run: |
-          BUILD_MODE="${{ steps.trigger.outputs.build_mode }}"
-          
-          if [ "$BUILD_MODE" = "rc" ]; then
-            # RC mode: auto-calculate next RC version
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Tag trigger: use the tag directly as vllm-build version
+            VLLM_BUILD_VERSION="${{ github.ref_name }}"
+            echo "Using tag as vllm-build version: $VLLM_BUILD_VERSION"
+          else
+            # Manual trigger: auto-calculate next RC version
             git fetch --tags
             LATEST_TAG=$(git tag -l 'v*' | sort -V | tail -1)
             
@@ -160,15 +162,7 @@ jobs:
             fi
             
             VLLM_BUILD_VERSION="v${BASE_VERSION}-rc.${RC_NUM}"
-            echo "Auto-calculated RC version: $VLLM_BUILD_VERSION"
-          else
-            # Release mode: must have exact matching tag
-            VLLM_BUILD_VERSION=$(git describe --tags --exact-match 2>/dev/null || echo "")
-            if [ -z "$VLLM_BUILD_VERSION" ]; then
-              echo "::error::Release mode requires exact tag match. Current commit has no tag."
-              exit 1
-            fi
-            echo "Release mode - using tag: $VLLM_BUILD_VERSION"
+            echo "Auto-calculated RC version for manual trigger: $VLLM_BUILD_VERSION"
           fi
           
           echo "vllm_build_version_full=$VLLM_BUILD_VERSION" >> "$GITHUB_OUTPUT"
@@ -431,12 +425,13 @@ jobs:
           set -euo pipefail
           
           echo "Building measurement image with BuildKit export"
-          echo "Base image: ${{ steps.build.outputs.image_ref }}"
+          echo "Base image (local): ${{ steps.build.outputs.image_ref_local }}"
           mkdir -p ./measurements
           
+          # Use local image reference to avoid pulling from GHCR
           docker buildx build \
             -f Dockerfile.measure \
-            --build-arg BASE_IMAGE="${{ steps.build.outputs.image_ref }}" \
+            --build-arg BASE_IMAGE="${{ steps.build.outputs.image_ref_local }}" \
             --target export \
             --output type=local,dest=./measurements \
             .
