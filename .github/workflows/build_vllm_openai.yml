@@ -358,8 +358,8 @@ jobs:
           
           # Convert versions to PEP 440 format
           VLLM_VERSION_TAG=$(echo "$VLLM_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/-rc/g')
-          VLLM_BUILD_VERSION_TAG=$(echo "$VLLM_BUILD_VERSION" | sed 's/-rc\.//g')
-          CT_VERSION_TAG=$(echo "$CT_VERSION" | sed 's/-rc\.//g')
+          VLLM_BUILD_VERSION_TAG=$(echo "$VLLM_BUILD_VERSION" | sed 's/-rc\./rc/g')
+          CT_VERSION_TAG=$(echo "$CT_VERSION" | sed 's/-rc\./rc/g')
           
           PRIMARY_TAG="vllm-${VLLM_VERSION_TAG}_build-${VLLM_BUILD_VERSION_TAG}_crypto-${CT_VERSION_TAG}"
           SRC_REF='${{ env.GHCR_IMAGE_REPO }}:'"${PRIMARY_TAG}"
@@ -572,8 +572,8 @@ jobs:
           
           # Convert versions to PEP 440 format
           VLLM_VERSION_TAG=$(echo "$VLLM_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/-rc/g')
-          VLLM_BUILD_VERSION_TAG=$(echo "$VLLM_BUILD_VERSION" | sed 's/-rc\.//g')
-          CT_VERSION_TAG=$(echo "$CT_VERSION" | sed 's/-rc\.//g')
+          VLLM_BUILD_VERSION_TAG=$(echo "$VLLM_BUILD_VERSION" | sed 's/-rc\./rc/g')
+          CT_VERSION_TAG=$(echo "$CT_VERSION" | sed 's/-rc\./rc/g')
           
           PRIMARY_TAG="vllm-${VLLM_VERSION_TAG}_build-${VLLM_BUILD_VERSION_TAG}_crypto-${CT_VERSION_TAG}"
           SRC='${{ env.GHCR_IMAGE_REPO }}:'"${PRIMARY_TAG}"
