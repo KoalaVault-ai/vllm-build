@@ -1,11 +1,15 @@
 name: Build and Release vLLM Container
 
 on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+'
   workflow_dispatch:
     inputs:
       vllm_version:
-        description: "vLLM version (e.g., v0.9.2)"
-        required: true
+        description: "vLLM version (e.g., v0.9.2), leave empty to use vllm_versions file"
+        required: false
         type: string
       register_baseline:
         description: "Register baseline to API"
@@ -17,12 +21,68 @@ permissions:
 
 env:
   DOCKERFILE: Dockerfile
+  GHCR_IMAGE_REPO: ghcr.io/KoalaVault-ai/vllm-openai
+  DOCKERHUB_IMAGE_REPO: ${{ vars.DOCKERHUB_USERNAME }}/vllm-openai
 
 jobs:
   build-and-measure:
     name: Build, Measure and Register
     runs-on: ubuntu-latest
+    outputs:
+      build_mode: ${{ steps.trigger.outputs.build_mode }}
+      vllm_version: ${{ steps.meta.outputs.vllm_version }}
+      vllm_build_version_full: ${{ steps.vllm_build_ver.outputs.vllm_build_version_full }}
+      ct_version_full: ${{ steps.ct_tag.outputs.ct_version_full }}
+      ct_version_wheel: ${{ steps.ct_tag.outputs.ct_version_wheel }}
     steps:
+      - name: Determine trigger mode and vLLM version
+        id: trigger
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            # Tag push trigger
+            TAG_NAME="${{ github.ref_name }}"
+            echo "Triggered by tag: $TAG_NAME"
+            
+            # Determine build mode based on tag format
+            if [[ "$TAG_NAME" =~ -rc\. ]]; then
+              BUILD_MODE="rc"
+              echo "RC tag detected, using RC mode"
+            else
+              BUILD_MODE="release"
+              echo "Release tag detected, using release mode"
+            fi
+            
+            # Try to get vLLM version from tag message
+            TAG_MESSAGE=$(git tag -l --format='%(contents)' "$TAG_NAME" || echo "")
+            if [[ "$TAG_MESSAGE" =~ vllm:\ *(v[0-9]+\.[0-9]+\.[0-9]+) ]]; then
+              VLLM_VERSION="${BASH_REMATCH[1]}"
+              echo "vLLM version from tag message: $VLLM_VERSION"
+            else
+              echo "No vLLM version in tag message, will use vllm_versions file"
+              VLLM_VERSION=""
+            fi
+            
+            REGISTER_BASELINE="true"
+          else
+            # Manual workflow_dispatch trigger - always RC mode
+            BUILD_MODE="rc"
+            VLLM_VERSION="${{ github.event.inputs.vllm_version }}"
+            REGISTER_BASELINE="${{ github.event.inputs.register_baseline }}"
+            echo "Manual trigger - using RC mode"
+            if [ -z "$VLLM_VERSION" ]; then
+              echo "No vLLM version provided, will use vllm_versions file"
+            fi
+          fi
+          
+          echo "build_mode=$BUILD_MODE" >> "$GITHUB_OUTPUT"
+          echo "vllm_version=$VLLM_VERSION" >> "$GITHUB_OUTPUT"
+          echo "register_baseline=$REGISTER_BASELINE" >> "$GITHUB_OUTPUT"
+          
+          echo "=== Trigger Configuration ==="
+          echo "Build Mode: $BUILD_MODE"
+          echo "vLLM Version: $VLLM_VERSION"
+          echo "Register Baseline: $REGISTER_BASELINE"
+      
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -39,36 +99,107 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Read vLLM-Build version
+      - name: Determine final vLLM version
+        id: vllm_version
+        run: |
+          VLLM_VERSION="${{ steps.trigger.outputs.vllm_version }}"
+          
+          if [ -z "$VLLM_VERSION" ]; then
+            # Read from vllm_versions file (first non-comment, non-empty line)
+            VLLM_VERSION=$(grep -v '^#' vllm_versions | grep -v '^$' | head -1 | tr -d '[:space:]')
+            if [ -z "$VLLM_VERSION" ]; then
+              echo "::error::No vLLM version found in vllm_versions file"
+              exit 1
+            fi
+            echo "Using vLLM version from vllm_versions file: $VLLM_VERSION"
+          else
+            echo "Using vLLM version from input/tag: $VLLM_VERSION"
+          fi
+          
+          echo "vllm_version=$VLLM_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Determine vLLM-Build version
         id: vllm_build_ver
         run: |
-          # Get version from git tag (fetch full history for accurate tagging)
-          VLLM_BUILD_VERSION=$(git describe --tags --exact-match 2>/dev/null || git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -z "$VLLM_BUILD_VERSION" ]; then
-            echo "::warning::No git tag found. Using 'dev' as version."
-            VLLM_BUILD_VERSION="dev"
+          BUILD_MODE="${{ steps.trigger.outputs.build_mode }}"
+          
+          if [ "$BUILD_MODE" = "rc" ]; then
+            # RC mode: auto-calculate next RC version
+            git fetch --tags
+            LATEST_TAG=$(git tag -l 'v*' | sort -V | tail -1)
+            
+            if [ -z "$LATEST_TAG" ]; then
+              # No tags exist, start with v0.0.1-rc.1
+              BASE_VERSION="0.0.1"
+              RC_NUM=1
+            else
+              # Remove 'v' prefix
+              LATEST_VERSION="${LATEST_TAG#v}"
+              
+              if [[ "$LATEST_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-rc\.([0-9]+)$ ]]; then
+                # Latest is an RC version, increment RC number
+                BASE_VERSION="${BASH_REMATCH[1]}"
+                RC_NUM=$((${BASH_REMATCH[2]} + 1))
+              else
+                # Latest is a release version, increment patch and start rc.1
+                if [[ "$LATEST_VERSION" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+                  MAJOR="${BASH_REMATCH[1]}"
+                  MINOR="${BASH_REMATCH[2]}"
+                  PATCH="${BASH_REMATCH[3]}"
+                  BASE_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+                  RC_NUM=1
+                else
+                  echo "::error::Failed to parse version: $LATEST_VERSION"
+                  exit 1
+                fi
+              fi
+            fi
+            
+            VLLM_BUILD_VERSION="v${BASE_VERSION}-rc.${RC_NUM}"
+            echo "Auto-calculated RC version: $VLLM_BUILD_VERSION"
           else
-            echo "vLLM-Build version from git: $VLLM_BUILD_VERSION"
+            # Release mode: must have exact matching tag
+            VLLM_BUILD_VERSION=$(git describe --tags --exact-match 2>/dev/null || echo "")
+            if [ -z "$VLLM_BUILD_VERSION" ]; then
+              echo "::error::Release mode requires exact tag match. Current commit has no tag."
+              exit 1
+            fi
+            echo "Release mode - using tag: $VLLM_BUILD_VERSION"
           fi
-          echo "vllm_build_version=$VLLM_BUILD_VERSION" >> "$GITHUB_OUTPUT"
+          
+          echo "vllm_build_version_full=$VLLM_BUILD_VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Download cryptotensors packages
+      - name: Determine CryptoTensors release tag
+        id: ct_tag
         env:
           GH_TOKEN: ${{ secrets.KOALAVAULT_TOKEN }}
         run: |
+          BUILD_MODE="${{ steps.trigger.outputs.build_mode }}"
+          if [ "$BUILD_MODE" = "rc" ]; then
+            TAG=$(gh release view --repo KoalaVault-ai/cryptotensors --json tagName -q .tagName)
+          else
+            TAG=$(gh release list --repo KoalaVault-ai/cryptotensors --limit 50 | grep -v 'rc\.' | head -1 | awk '{print $1}')
+          fi
+          echo "cryptotensors_tag=$TAG" >> "$GITHUB_OUTPUT"
+          CT_VER="${TAG#core/}"
+          echo "ct_version_full=$CT_VER" >> "$GITHUB_OUTPUT"
+
+      - name: Download cryptotensors packages by tag
+        env:
+          GH_TOKEN: ${{ secrets.KOALAVAULT_TOKEN }}
+        run: |
+          TAG="${{ steps.ct_tag.outputs.cryptotensors_tag }}"
+          
           # Architecture is fixed to x86_64
           WHEEL_ARCH="x86_64"
           
-          echo "Downloading packages for architecture: $WHEEL_ARCH"
+          echo "Downloading by tag: $TAG for arch: $WHEEL_ARCH"
           
           # Clean up any existing wheel files first
           rm -f *.whl 2>/dev/null || true
           
-          # Download architecture-specific cryptotensors wheel only
-          gh release download --repo koalavault/cryptotensors --pattern "*manylinux*${WHEEL_ARCH}.whl"
-          
-          # Download safetensors wheel (platform-independent)
-          gh release download --repo koalavault/cryptotensors --pattern "safetensors-*.whl"
+          gh release download "$TAG" --repo KoalaVault-ai/cryptotensors --pattern "*manylinux*${WHEEL_ARCH}.whl"
+          gh release download "$TAG" --repo KoalaVault-ai/cryptotensors --pattern "safetensors-*.whl"
           
           # Verify required files exist
           if ! ls cryptotensors-*-manylinux_*_${WHEEL_ARCH}.whl 1> /dev/null 2>&1; then
@@ -86,16 +217,21 @@ jobs:
           echo "Downloaded packages:"
           ls -lh *.whl
 
+      
+
       - name: Extract CryptoTensors version
         id: crypto_version
         run: |
-          # Extract version from cryptotensors wheel filename
-          # e.g., cryptotensors-0.1.0-cp38-abi3-manylinux_2_28_x86_64.whl -> v0.1.0
+          # Extract version from cryptotensors wheel filename (PEP 440 format)
+          # e.g., cryptotensors-0.1.0rc1-cp38-abi3-manylinux_2_28_x86_64.whl -> 0.1.0rc1
+          # e.g., cryptotensors-0.1.0-cp38-abi3-manylinux_2_28_x86_64.whl -> 0.1.0
           CRYPTO_WHL=$(ls cryptotensors-*-manylinux_*.whl | head -1)
-          CRYPTO_VERSION=$(echo "$CRYPTO_WHL" | sed 's/cryptotensors-//' | sed 's/-cp.*//')
-          CRYPTO_VERSION="v${CRYPTO_VERSION}"
-          echo "cryptotensors_version=$CRYPTO_VERSION" >> "$GITHUB_OUTPUT"
-          echo "CryptoTensors version: $CRYPTO_VERSION"
+          CRYPTO_VERSION_WHEEL=$(echo "$CRYPTO_WHL" | sed 's/cryptotensors-//' | sed 's/-cp.*//')
+          CRYPTO_VERSION_CLEAN=$(echo "$CRYPTO_VERSION_WHEEL" | sed 's/rc/rc/')
+          echo "ct_version_wheel=$CRYPTO_VERSION_WHEEL" >> "$GITHUB_OUTPUT"
+          echo "ct_version_clean=$CRYPTO_VERSION_CLEAN" >> "$GITHUB_OUTPUT"
+          echo "ct_version_full=${{ steps.ct_tag.outputs.ct_version_full }}" >> "$GITHUB_OUTPUT"
+          echo "CryptoTensors wheel version: $CRYPTO_VERSION_WHEEL"
           echo "CryptoTensors wheel: $CRYPTO_WHL"
 
       - name: Determine build metadata
@@ -104,7 +240,7 @@ jobs:
           set -euo pipefail
           
           # Build base image from version input
-          VLLM_VERSION="${{ github.event.inputs.vllm_version }}"
+          VLLM_VERSION="${{ steps.vllm_version.outputs.vllm_version }}"
           BASE_IMAGE="vllm/vllm-openai:${VLLM_VERSION}"
           IMAGE_NAME="vllm-openai"
           
@@ -121,18 +257,22 @@ jobs:
           echo "docker_arch=$DOCKER_ARCH" >> "$GITHUB_OUTPUT"
 
           # Get CryptoTensors version
-          CRYPTO_VERSION="${{ steps.crypto_version.outputs.cryptotensors_version }}"
-          echo "cryptotensors_version=$CRYPTO_VERSION" >> "$GITHUB_OUTPUT"
+          CT_VERSION_WHEEL="${{ steps.crypto_version.outputs.ct_version_wheel }}"
+          CT_VERSION_CLEAN="${{ steps.crypto_version.outputs.ct_version_clean }}"
+          CT_VERSION_FULL="${{ steps.ct_tag.outputs.ct_version_full }}"
+          echo "ct_version_wheel=$CT_VERSION_WHEEL" >> "$GITHUB_OUTPUT"
+          echo "ct_version_clean=$CT_VERSION_CLEAN" >> "$GITHUB_OUTPUT"
+          echo "ct_version_full=$CT_VERSION_FULL" >> "$GITHUB_OUTPUT"
           
           # Get vllm-build version
-          VLLM_BUILD_VERSION="${{ steps.vllm_build_ver.outputs.vllm_build_version }}"
-          echo "vllm_build_version=$VLLM_BUILD_VERSION" >> "$GITHUB_OUTPUT"
+          VLLM_BUILD_VERSION="${{ steps.vllm_build_ver.outputs.vllm_build_version_full }}"
+          echo "vllm_build_version_full=$VLLM_BUILD_VERSION" >> "$GITHUB_OUTPUT"
 
           # Platform is always CUDA for vllm-openai
           PLATFORM_SUFFIX="cuda"
           
           # Build framework version: vllm-{version}-{arch}-{cuda}-{os}-build-{vllm-build-ver}-cryptotensors-{crypto-ver}
-          FRAMEWORK_VERSION="vllm-${VLLM_VERSION}-${ARCH}-${PLATFORM_SUFFIX}-${PLATFORM_OS}-build-${VLLM_BUILD_VERSION}-cryptotensors-${CRYPTO_VERSION}"
+          FRAMEWORK_VERSION="vllm-${VLLM_VERSION}-${ARCH}-${PLATFORM_SUFFIX}-${PLATFORM_OS}-build-${VLLM_BUILD_VERSION}-cryptotensors-${{ steps.ct_tag.outputs.ct_version_full }}"
           echo "framework_version=$FRAMEWORK_VERSION" >> "$GITHUB_OUTPUT"
 
           # Get current build date (YYYY-MM-DD format)
@@ -154,25 +294,34 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Login Docker Hub
+      - name: Login GHCR
         uses: docker/login-action@v3
         with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build application image
+      - name: Build application image to GHCR
         id: build
         run: |
           set -euo pipefail
-          IMAGE_NAME="${{ steps.meta.outputs.image_name }}"
-          TAG="${{ steps.meta.outputs.vllm_version }}"
+          VLLM_VERSION="${{ steps.meta.outputs.vllm_version }}"
+          VLLM_BUILD_VERSION="${{ steps.vllm_build_ver.outputs.vllm_build_version_full }}"
+          CT_VERSION="${{ steps.ct_tag.outputs.ct_version_full }}"
           PLATFORM="${{ steps.meta.outputs.platform_os }}/${{ steps.meta.outputs.docker_arch }}"
-          IMAGE_REF="${{ vars.DOCKERHUB_USERNAME }}/${IMAGE_NAME}:${TAG}"
-          echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
+          
+          # Convert versions to PEP 440 format (remove hyphens before rc)
+          # v0.0.3-rc.1 -> v0.0.3rc1
+          VLLM_VERSION_TAG=$(echo "$VLLM_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
+          VLLM_BUILD_VERSION_TAG=$(echo "$VLLM_BUILD_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
+          CT_VERSION_TAG=$(echo "$CT_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
+          
+          PRIMARY_TAG="vllm-${VLLM_VERSION_TAG}_build-${VLLM_BUILD_VERSION_TAG}_crypto-${CT_VERSION_TAG}"
+          IMAGE_REF_GHCR="${{ env.GHCR_IMAGE_REPO }}:${PRIMARY_TAG}"
+          echo "image_ref=${IMAGE_REF_GHCR}" >> "$GITHUB_OUTPUT"
 
-          # Build application image
           echo "[Stage 1] Building from base image: ${{ steps.meta.outputs.base_image }}"
-          echo "[Stage 1] Target image: ${IMAGE_REF}"
+          echo "[Stage 1] Target image: ${IMAGE_REF_GHCR}"
           echo "[Stage 1] Platform: ${PLATFORM}"
           echo "[Stage 1] Architecture: ${{ steps.meta.outputs.arch }}"
           
@@ -182,13 +331,44 @@ jobs:
             --build-arg "BASE_IMAGE=${{ steps.meta.outputs.base_image }}" \
             --build-arg "FRAMEWORK_VERSION=${{ steps.meta.outputs.framework_version }}" \
             --build-arg "VLLM_VERSION=${{ steps.meta.outputs.vllm_version }}" \
-            --build-arg "VLLM_BUILD_VERSION=${{ steps.meta.outputs.vllm_build_version }}" \
-            --build-arg "CRYPTOTENSORS_VERSION=${{ steps.meta.outputs.cryptotensors_version }}" \
+            --build-arg "VLLM_BUILD_VERSION=${{ steps.vllm_build_ver.outputs.vllm_build_version_full }}" \
+            --build-arg "CRYPTOTENSORS_VERSION=${{ steps.crypto_version.outputs.ct_version_full }}" \
             --build-arg "BUILD_DATE=${{ steps.meta.outputs.build_date }}" \
-            --tag "${IMAGE_REF}" \
+            --label "io.vllm.version=${VLLM_VERSION}" \
+            --label "io.vllm.build=${VLLM_BUILD_VERSION}" \
+            --label "io.cryptotensors.version=${CT_VERSION}" \
+            --label "org.opencontainers.image.version=${PRIMARY_TAG}" \
+            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            --tag "${IMAGE_REF_GHCR}" \
             --provenance=false \
             --push \
             .
+
+      - name: Create GHCR aliases on release
+        if: ${{ steps.trigger.outputs.build_mode == 'release' }}
+        run: |
+          set -euo pipefail
+          VLLM_VERSION='${{ steps.meta.outputs.vllm_version }}'
+          VLLM_BUILD_VERSION='${{ steps.vllm_build_ver.outputs.vllm_build_version_full }}'
+          CT_VERSION='${{ steps.crypto_version.outputs.ct_version_full }}'
+          
+          # Convert versions to PEP 440 format
+          VLLM_VERSION_TAG=$(echo "$VLLM_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/-rc/g')
+          VLLM_BUILD_VERSION_TAG=$(echo "$VLLM_BUILD_VERSION" | sed 's/-rc\.//g')
+          CT_VERSION_TAG=$(echo "$CT_VERSION" | sed 's/-rc\.//g')
+          
+          PRIMARY_TAG="vllm-${VLLM_VERSION_TAG}_build-${VLLM_BUILD_VERSION_TAG}_crypto-${CT_VERSION_TAG}"
+          SRC_REF='${{ env.GHCR_IMAGE_REPO }}:'"${PRIMARY_TAG}"
+          V_MAJ_MIN=$(echo "$VLLM_VERSION" | sed -E 's/^v([0-9]+\.[0-9]+)\..*/v\1/')
+          CT_MAJ_MIN=$(echo "$CT_VERSION" | sed -E 's/^v([0-9]+\.[0-9]+)\..*/v\1/')
+          ALIAS1='${{ env.GHCR_IMAGE_REPO }}:'"vllm-${V_MAJ_MIN}"
+          ALIAS2='${{ env.GHCR_IMAGE_REPO }}:'"vllm-${V_MAJ_MIN}_crypto-${CT_MAJ_MIN}"
+          ALIAS3='${{ env.GHCR_IMAGE_REPO }}:'"${VLLM_VERSION}"
+          ALIAS4='${{ env.GHCR_IMAGE_REPO }}:'"latest"
+          for A in "$ALIAS1" "$ALIAS2" "$ALIAS3" "$ALIAS4"; do
+            echo "Creating alias: $A -> $SRC_REF"
+            docker buildx imagetools create --tag "$A" "$SRC_REF"
+          done
 
       - name: Print build summary
         run: |
@@ -197,8 +377,8 @@ jobs:
           echo "Image Name: ${{ steps.meta.outputs.image_name }}"
           echo "Platform: ${{ steps.meta.outputs.platform_os }}/${{ steps.meta.outputs.arch }}"
           echo "vLLM Version: ${{ steps.meta.outputs.vllm_version }}"
-          echo "vLLM-Build Version: ${{ steps.meta.outputs.vllm_build_version }}"
-          echo "CryptoTensors Version: ${{ steps.meta.outputs.cryptotensors_version }}"
+          echo "vLLM-Build Version: ${{ steps.meta.outputs.vllm_build_version_full }}"
+          echo "CryptoTensors Version: ${{ steps.meta.outputs.ct_version_full }}"
           echo "Framework Version: ${{ steps.meta.outputs.framework_version }}"
 
       - name: Determine hash-builder architecture
@@ -212,7 +392,7 @@ jobs:
       - name: Download hash-builder binary
         uses: robinraju/release-downloader@v1
         with:
-          repository: koalavault/cryptotensors
+          repository: KoalaVault-ai/cryptotensors
           latest: true
           fileName: hash-builder-linux-${{ steps.hash_arch.outputs.hash_arch }}
           token: ${{ secrets.KOALAVAULT_TOKEN }}
@@ -266,7 +446,7 @@ jobs:
           echo "================================"
 
       - name: Register baseline to API
-        if: ${{ github.event.inputs.register_baseline == 'true' && vars.KOALAVAULT_API_BASE_URL != '' }}
+        if: ${{ steps.trigger.outputs.register_baseline == 'true' && vars.KOALAVAULT_API_BASE_URL != '' }}
         run: |
           set -euo pipefail
           
@@ -275,8 +455,8 @@ jobs:
           BASELINE_HASH="${{ steps.measure.outputs.measurement_hash }}"
           FRAMEWORK_VERSION="${{ steps.meta.outputs.framework_version }}"
           VLLM_VERSION="${{ steps.meta.outputs.vllm_version }}"
-          VLLM_BUILD_VERSION="${{ steps.meta.outputs.vllm_build_version }}"
-          CRYPTOTENSORS_VERSION="${{ steps.meta.outputs.cryptotensors_version }}"
+          VLLM_BUILD_VERSION="${{ steps.meta.outputs.vllm_build_version_full }}"
+          CRYPTOTENSORS_VERSION="${{ steps.meta.outputs.ct_version_full }}"
           BUILD_DATE="${{ steps.meta.outputs.build_date }}"
           
           # Build version.json as a JSON string for description field
@@ -344,3 +524,49 @@ jobs:
             echo "$RESPONSE"
             exit 1
           fi
+
+  publish-dockerhub:
+    name: Publish to Docker Hub (mirror GHCR digest)
+    needs: build-and-measure
+    if: ${{ needs.build-and-measure.outputs.build_mode == 'release' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ vars.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Mirror primary tag to Docker Hub via imagetools and create aliases
+        run: |
+          set -euo pipefail
+          VLLM_VERSION='${{ needs.build-and-measure.outputs.vllm_version }}'
+          VLLM_BUILD_VERSION='${{ needs.build-and-measure.outputs.vllm_build_version_full }}'
+          CT_VERSION='${{ needs.build-and-measure.outputs.ct_version_full }}'
+          
+          # Convert versions to PEP 440 format
+          VLLM_VERSION_TAG=$(echo "$VLLM_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/-rc/g')
+          VLLM_BUILD_VERSION_TAG=$(echo "$VLLM_BUILD_VERSION" | sed 's/-rc\.//g')
+          CT_VERSION_TAG=$(echo "$CT_VERSION" | sed 's/-rc\.//g')
+          
+          PRIMARY_TAG="vllm-${VLLM_VERSION_TAG}_build-${VLLM_BUILD_VERSION_TAG}_crypto-${CT_VERSION_TAG}"
+          SRC='${{ env.GHCR_IMAGE_REPO }}:'"${PRIMARY_TAG}"
+          DST='${{ env.DOCKERHUB_IMAGE_REPO }}:'"${PRIMARY_TAG}"
+          echo "Mirroring ${SRC} -> ${DST}"
+          if docker buildx imagetools inspect "${DST}" > /dev/null 2>&1; then
+            echo "Tag exists on Docker Hub, skipping: ${DST}"
+          else
+            docker buildx imagetools create --tag "${DST}" "${SRC}"
+          fi
+          V_MAJ_MIN=$(echo "$VLLM_VERSION" | sed -E 's/^v([0-9]+\.[0-9]+)\..*/v\1/')
+          CT_MAJ_MIN=$(echo "$CT_VERSION" | sed -E 's/^v([0-9]+\.[0-9]+)\..*/v\1/')
+          ALIAS1='${{ env.DOCKERHUB_IMAGE_REPO }}:'"vllm-${V_MAJ_MIN}"
+          ALIAS2='${{ env.DOCKERHUB_IMAGE_REPO }}:'"vllm-${V_MAJ_MIN}_crypto-${CT_MAJ_MIN}"
+          ALIAS3='${{ env.DOCKERHUB_IMAGE_REPO }}:'"${VLLM_VERSION}"
+          ALIAS4='${{ env.DOCKERHUB_IMAGE_REPO }}:'"latest"
+          for A in "$ALIAS1" "$ALIAS2" "$ALIAS3" "$ALIAS4"; do
+            docker buildx imagetools create --tag "$A" "$DST"
+          done
