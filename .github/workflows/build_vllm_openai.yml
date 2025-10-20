@@ -291,7 +291,7 @@ jobs:
           echo "OS: $PLATFORM_OS"
           echo "vLLM Version: $VLLM_VERSION"
           echo "vLLM-Build Version: $VLLM_BUILD_VERSION"
-          echo "CryptoTensors Version: $CRYPTO_VERSION"
+          echo "CryptoTensors Version: $CT_VERSION_FULL"
           echo "Framework Version: $FRAMEWORK_VERSION"
           echo "Build Date: $BUILD_DATE"
 
@@ -362,16 +362,11 @@ jobs:
           
           PRIMARY_TAG="vllm-${VLLM_VERSION_TAG}_build-${VLLM_BUILD_VERSION_TAG}_crypto-${CT_VERSION_TAG}"
           SRC_REF='${{ env.GHCR_IMAGE_REPO }}:'"${PRIMARY_TAG}"
-          V_MAJ_MIN=$(echo "$VLLM_VERSION" | sed -E 's/^v([0-9]+\.[0-9]+)\..*/v\1/')
-          CT_MAJ_MIN=$(echo "$CT_VERSION" | sed -E 's/^v([0-9]+\.[0-9]+)\..*/v\1/')
-          ALIAS1='${{ env.GHCR_IMAGE_REPO }}:'"vllm-${V_MAJ_MIN}"
-          ALIAS2='${{ env.GHCR_IMAGE_REPO }}:'"vllm-${V_MAJ_MIN}_crypto-${CT_MAJ_MIN}"
-          ALIAS3='${{ env.GHCR_IMAGE_REPO }}:'"${VLLM_VERSION}"
-          ALIAS4='${{ env.GHCR_IMAGE_REPO }}:'"latest"
-          for A in "$ALIAS1" "$ALIAS2" "$ALIAS3" "$ALIAS4"; do
-            echo "Creating alias: $A -> $SRC_REF"
-            docker buildx imagetools create --tag "$A" "$SRC_REF"
-          done
+          
+          # User-friendly alias: vLLM version
+          ALIAS='${{ env.GHCR_IMAGE_REPO }}:'"${VLLM_VERSION}"
+          echo "Creating alias: $ALIAS -> $SRC_REF"
+          docker buildx imagetools create --tag "$ALIAS" "$SRC_REF"
 
       - name: Print build summary
         run: |
@@ -564,12 +559,8 @@ jobs:
           else
             docker buildx imagetools create --tag "${DST}" "${SRC}"
           fi
-          V_MAJ_MIN=$(echo "$VLLM_VERSION" | sed -E 's/^v([0-9]+\.[0-9]+)\..*/v\1/')
-          CT_MAJ_MIN=$(echo "$CT_VERSION" | sed -E 's/^v([0-9]+\.[0-9]+)\..*/v\1/')
-          ALIAS1='${{ env.DOCKERHUB_IMAGE_REPO }}:'"vllm-${V_MAJ_MIN}"
-          ALIAS2='${{ env.DOCKERHUB_IMAGE_REPO }}:'"vllm-${V_MAJ_MIN}_crypto-${CT_MAJ_MIN}"
-          ALIAS3='${{ env.DOCKERHUB_IMAGE_REPO }}:'"${VLLM_VERSION}"
-          ALIAS4='${{ env.DOCKERHUB_IMAGE_REPO }}:'"latest"
-          for A in "$ALIAS1" "$ALIAS2" "$ALIAS3" "$ALIAS4"; do
-            docker buildx imagetools create --tag "$A" "$DST"
-          done
+          
+          # User-friendly alias on Docker Hub: vLLM version
+          ALIAS='${{ env.DOCKERHUB_IMAGE_REPO }}:'"${VLLM_VERSION}"
+          echo "Creating alias: $ALIAS -> $DST"
+          docker buildx imagetools create --tag "$ALIAS" "$DST"

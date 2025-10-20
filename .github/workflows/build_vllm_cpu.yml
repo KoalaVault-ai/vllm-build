@@ -328,7 +328,7 @@ jobs:
           echo "OS: $PLATFORM_OS"
           echo "vLLM Version: $VLLM_TAG"
           echo "vLLM-Build Version: $VLLM_BUILD_VERSION"
-          echo "CryptoTensors Version: $CRYPTO_VERSION"
+          echo "CryptoTensors Version: $CT_VERSION_FULL"
           echo "Framework Version: $FRAMEWORK_VERSION"
           echo "Build Date: $BUILD_DATE"
 
@@ -511,17 +511,11 @@ jobs:
           docker manifest push "${TARGET}"
 
           if [ "$BUILD_MODE" = "release" ]; then
-            V_MAJ_MIN=$(echo "$VLLM_VERSION" | sed -E 's/^v([0-9]+\.[0-9]+)\..*/v\1/')
-            CT_MAJ_MIN=$(echo "$CT_VERSION" | sed -E 's/^v([0-9]+\.[0-9]+)\..*/v\1/')
-            ALIAS1="${{ env.GHCR_IMAGE_REPO }}:vllm-${V_MAJ_MIN}"
-            ALIAS2="${{ env.GHCR_IMAGE_REPO }}:vllm-${V_MAJ_MIN}_crypto-${CT_MAJ_MIN}"
-            ALIAS3="${{ env.GHCR_IMAGE_REPO }}:${VLLM_VERSION}"
-            ALIAS4="${{ env.GHCR_IMAGE_REPO }}:latest"
-            for A in "$ALIAS1" "$ALIAS2" "$ALIAS3" "$ALIAS4"; do
-              echo "Publishing alias manifest: $A -> ${AMD},${ARM}"
-              docker manifest create "$A" "${AMD}" "${ARM}"
-              docker manifest push "$A"
-            done
+            # User-friendly alias: vLLM version
+            ALIAS="${{ env.GHCR_IMAGE_REPO }}:${VLLM_VERSION}"
+            echo "Publishing alias manifest: $ALIAS -> ${AMD},${ARM}"
+            docker manifest create "$ALIAS" "${AMD}" "${ARM}"
+            docker manifest push "$ALIAS"
           else
             echo "RC mode: skip aliases"
           fi
@@ -751,18 +745,10 @@ jobs:
           PRIMARY_TAG="vllm-${VLLM_VERSION_TAG}_build-${VLLM_BUILD_VERSION_TAG}_crypto-${CT_VERSION_TAG}"
           SRC="${{ env.DOCKERHUB_IMAGE_REPO }}:${PRIMARY_TAG}"
 
-          V_MAJ_MIN=$(echo "$VLLM_VERSION" | sed -E 's/^v([0-9]+\.[0-9]+)\..*/v\1/')
-          CT_MAJ_MIN=$(echo "$CT_VERSION" | sed -E 's/^v([0-9]+\.[0-9]+)\..*/v\1/')
-
-          # Floating and user-friendly aliases on Docker Hub
-          ALIAS1="${{ env.DOCKERHUB_IMAGE_REPO }}:vllm-${V_MAJ_MIN}"
-          ALIAS2="${{ env.DOCKERHUB_IMAGE_REPO }}:vllm-${V_MAJ_MIN}_crypto-${CT_MAJ_MIN}"
-          ALIAS3="${{ env.DOCKERHUB_IMAGE_REPO }}:${VLLM_VERSION}"
-          ALIAS4="${{ env.DOCKERHUB_IMAGE_REPO }}:latest"
-
-          for A in "$ALIAS1" "$ALIAS2" "$ALIAS3" "$ALIAS4"; do
-            if docker buildx imagetools inspect "$A" > /dev/null 2>&1; then
-              echo "Alias already exists, updating to point to ${SRC}: $A"
-            fi
-            docker buildx imagetools create --tag "$A" "$SRC"
-          done
+          # User-friendly alias on Docker Hub: vLLM version
+          ALIAS="${{ env.DOCKERHUB_IMAGE_REPO }}:${VLLM_VERSION}"
+          
+          if docker buildx imagetools inspect "$ALIAS" > /dev/null 2>&1; then
+            echo "Alias already exists, updating to point to ${SRC}: $ALIAS"
+          fi
+          docker buildx imagetools create --tag "$ALIAS" "$SRC"
