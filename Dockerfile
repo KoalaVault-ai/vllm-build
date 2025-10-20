@@ -27,15 +27,9 @@ ARG VLLM_VERSION
 ARG VLLM_BUILD_VERSION
 ARG CRYPTOTENSORS_VERSION
 ARG BUILD_DATE
-RUN PYTHON_SITE=$(python3 -c "import site; print(site.getsitepackages()[0])") && \
-    mkdir -p "$PYTHON_SITE" && \
+RUN mkdir -p /opt/venv/lib/python3.12/site-packages && \
     printf '{\n  "framework_version": "%s",\n  "framework": "vllm",\n  "vllm_version": "%s",\n  "vllm_build_version": "%s",\n  "cryptotensors_version": "%s",\n  "build_date": "%s"\n}\n' \
-        "${FRAMEWORK_VERSION}" "${VLLM_VERSION}" "${VLLM_BUILD_VERSION}" "${CRYPTOTENSORS_VERSION}" "${BUILD_DATE}" > "$PYTHON_SITE/version.json" && \
-    echo "=========================================" && \
-    echo "version.json location: $PYTHON_SITE/version.json" && \
-    echo "=========================================" && \
-    cat "$PYTHON_SITE/version.json" && \
-    echo "========================================="
+        "${FRAMEWORK_VERSION}" "${VLLM_VERSION}" "${VLLM_BUILD_VERSION}" "${CRYPTOTENSORS_VERSION}" "${BUILD_DATE}" > /opt/venv/lib/python3.12/site-packages/version.json
 
 # Install pre-compiled wheels (no compilation needed)
 COPY cryptotensors-*.whl safetensors-*.whl /tmp/
@@ -44,17 +38,14 @@ RUN python3 -m pip uninstall -y safetensors || true && \
     python3 -m pip install --no-cache-dir /tmp/cryptotensors-*.whl /tmp/safetensors-*.whl && \
     rm -f /tmp/*.whl
 
-# Install boot script
-COPY boot.py /usr/local/bin/boot
-RUN chmod +x /usr/local/bin/boot
+# Install boot script in site-packages (same location as version.json)
+# This ensures boot.py is included in attestation measurement
+COPY boot.py /opt/venv/lib/python3.12/site-packages/boot.py
 
-# Create symbolic links to consolidate tmpfs mounts
-# All runtime caches will be stored in /tmp, reducing Docker run arguments
-RUN mkdir -p /root/.cache && \
-    mkdir -p /tmp/triton /tmp/vllm /tmp/torch && \
-    ln -sf /tmp/triton /root/.triton && \
-    ln -sf /tmp/vllm /root/.cache/vllm && \
-    ln -sf /tmp/torch /root/.cache/torch
+# Create base directory structure
+# Actual symlinks and subdirectories will be created by boot.py at runtime
+# This ensures correct structure regardless of mount scenarios
+RUN mkdir -p /root/.cache /tmp
 
 WORKDIR /workspace
-ENTRYPOINT ["/usr/bin/tini", "-g", "--", "/usr/local/bin/boot"]
+ENTRYPOINT ["/usr/bin/tini", "-g", "--", "python3", "/opt/venv/lib/python3.12/site-packages/boot.py"]
