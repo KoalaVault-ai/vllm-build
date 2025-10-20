@@ -23,6 +23,7 @@ on:
         type: boolean
 permissions:
   contents: read
+  packages: write
 
 env:
   VLLM_REPO: vllm-project/vllm
