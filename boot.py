@@ -3,7 +3,6 @@
 
 import os
 import sys
-import shutil
 import importlib.util
 import importlib
 
@@ -92,44 +91,23 @@ def find_forbidden(vllm_args):
 def main():
     # ---- Setup cache directory structure ----
     # This runs at container startup to ensure correct structure regardless of mount scenarios
-    # Supports: --tmpfs /tmp, --tmpfs /root/.cache, or no tmpfs at all
+    # 
+    # Reasoning:
+    # - /tmp subdirectories: Must be created because --tmpfs /tmp clears everything
+    # - Symlinks: Already created in Dockerfile, no need to touch them
+    # - /root/.cache/huggingface: User's responsibility to mount if using --read-only
+    # 
+    # If user needs writable paths with --read-only, they must mount them:
+    #   --tmpfs /tmp:exec,nosuid,nodev
+    #   --tmpfs /root/.cache/huggingface:rw,nosuid,nodev
+    #   (or use -v for persistent storage)
     
-    # Step 1: Create /tmp subdirectories (targets for symlinks)
+    # Create /tmp subdirectories (symlink targets)
+    # These are the ONLY paths boot.py manages - everything else is in Dockerfile or user mounts
     os.makedirs("/tmp/triton", exist_ok=True)
     os.makedirs("/tmp/vllm", exist_ok=True)
     os.makedirs("/tmp/torch", exist_ok=True)
     os.makedirs("/tmp/flashinfer", exist_ok=True)
-    
-    # Step 2: Ensure /root/.cache/huggingface is a real directory (not a symlink)
-    huggingface_path = "/root/.cache/huggingface"
-    if os.path.islink(huggingface_path):
-        os.unlink(huggingface_path)
-    os.makedirs(huggingface_path, exist_ok=True)
-    
-    # Step 3: Create symlinks for runtime caches
-    symlink_mappings = {
-        "/root/.triton": "/tmp/triton",
-        "/root/.cache/vllm": "/tmp/vllm",
-        "/root/.cache/torch": "/tmp/torch",
-        "/root/.cache/flashinfer": "/tmp/flashinfer",
-    }
-    
-    for link_path, target_path in symlink_mappings.items():
-        # Remove existing file/directory if it's not the correct symlink
-        if os.path.lexists(link_path):
-            if os.path.islink(link_path):
-                if os.readlink(link_path) == target_path:
-                    continue  # Already correct, skip
-                os.unlink(link_path)
-            else:
-                # It's a regular file/directory, remove it
-                if os.path.isdir(link_path):
-                    shutil.rmtree(link_path)
-                else:
-                    os.remove(link_path)
-        
-        # Create the symlink
-        os.symlink(target_path, link_path)
     
     argv = sys.argv[1:]
     crypto_args, vllm_args = split_args(argv)

@@ -42,10 +42,17 @@ RUN python3 -m pip uninstall -y safetensors || true && \
 # This ensures boot.py is included in attestation measurement
 COPY boot.py /opt/venv/lib/python3.12/site-packages/boot.py
 
-# Create base directory structure
-# Actual symlinks and subdirectories will be created by boot.py at runtime
-# This ensures correct structure regardless of mount scenarios
-RUN mkdir -p /root/.cache /tmp
+# Create cache directory structure and symlinks
+# Strategy:
+#   - /tmp subdirectories will be recreated by boot.py (tmpfs mount clears them)
+#   - Symlinks are created here for efficiency (boot.py will verify/fix if needed)
+#   - /root/.cache/huggingface is a real directory (not symlink) for flexible mounting
+RUN mkdir -p /root/.cache/huggingface && \
+    mkdir -p /tmp && \
+    ln -s /tmp/triton /root/.triton && \
+    ln -s /tmp/vllm /root/.cache/vllm && \
+    ln -s /tmp/torch /root/.cache/torch && \
+    ln -s /tmp/flashinfer /root/.cache/flashinfer
 
 WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/tini", "-g", "--", "python3", "/opt/venv/lib/python3.12/site-packages/boot.py"]
