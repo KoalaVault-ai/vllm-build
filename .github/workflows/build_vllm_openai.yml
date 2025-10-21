@@ -336,6 +336,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Pull vLLM base image for target architecture
+        run: |
+          BASE_IMAGE="${{ steps.meta.outputs.base_image }}"
+          PLATFORM="${{ steps.meta.outputs.platform_os }}/${{ steps.meta.outputs.docker_arch }}"
+          
+          echo "Pulling base image for platform: ${PLATFORM}"
+          docker pull --platform "${PLATFORM}" "${BASE_IMAGE}"
+          
+          echo "Verifying pulled image architecture:"
+          docker image inspect "${BASE_IMAGE}" --format '{{.Architecture}}'
+
       - name: Build application image to GHCR
         id: build
         run: |

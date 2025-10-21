@@ -260,11 +260,10 @@ jobs:
           echo "CryptoTensors wheel version: $CRYPTO_VERSION_WHEEL"
           echo "CryptoTensors wheel: $CRYPTO_WHL"
 
-      - name: Prepare packages for Docker build
+      - name: Verify downloaded packages
         run: |
-          echo "Packages for Docker build:"
+          echo "Downloaded packages:"
           ls -lh vllm-build/*.whl
-          ls -lh vllm-build/hash-builder*
 
       - name: Determine build metadata
         id: meta
