@@ -570,6 +570,12 @@ jobs:
           docker-images: true
           swap-storage: false
 
+      - name: Set up QEMU for ARM64 emulation
+        if: matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/arm64
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
@@ -597,17 +603,21 @@ jobs:
           
           PRIMARY_TAG="vllm-${VLLM_VERSION_TAG}_build-${VLLM_BUILD_VERSION_TAG}_crypto-${CT_VERSION_TAG}"
           
-          # Determine architecture suffix
+          # Determine architecture suffix and platform
           ARCH="${{ matrix.arch }}"
           if [ "$ARCH" = "x86" ]; then
             ARCH_SUFFIX="amd64"
+            PLATFORM="linux/amd64"
           else
             ARCH_SUFFIX="arm64"
+            PLATFORM="linux/arm64"
           fi
           
           IMAGE_REF="${{ env.GHCR_IMAGE_REPO }}:${PRIMARY_TAG}-${ARCH_SUFFIX}"
           echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
+          echo "platform=${PLATFORM}" >> "$GITHUB_OUTPUT"
           echo "Image to measure: ${IMAGE_REF}"
+          echo "Platform: ${PLATFORM}"
 
       - name: Aggressive cleanup before measurement
         run: |
@@ -686,7 +696,12 @@ jobs:
           
           # Build measurement image (buildx will pull from GHCR, already logged in)
           # After aggressive cleanup above, we have max space available
+          # Use correct platform to match the architecture-specific image
+          PLATFORM="${{ steps.image_info.outputs.platform }}"
+          echo "Building for platform: ${PLATFORM}"
+          
           docker buildx build \
+            --platform "${PLATFORM}" \
             -f Dockerfile.measure \
             --build-arg BASE_IMAGE="${IMAGE_REF}" \
             --target export \
