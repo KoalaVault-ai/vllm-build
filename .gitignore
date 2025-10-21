@@ -32,6 +32,9 @@ hash-builder
 hash-builder-linux-*
 measurements/
 
+# Local vLLM clone for ARM base image building
+vllm/
+
 # macOS system files
 .DS_Store
 

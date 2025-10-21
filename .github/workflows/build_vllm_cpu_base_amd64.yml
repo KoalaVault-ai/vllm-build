@@ -1,0 +1,144 @@
+name: Build vLLM CPU Base (AMD64)
+
+on:
+  workflow_dispatch:
+    inputs:
+      vllm_version:
+        description: 'vLLM version to build (e.g., v0.9.2)'
+        required: true
+        type: string
+      push_to_dockerhub:
+        description: 'Push to Docker Hub'
+        required: true
+        type: boolean
+        default: true
+
+env:
+  DOCKERHUB_USERNAME: ${{ vars.DOCKERHUB_USERNAME }}
+
+jobs:
+  build-base-amd64:
+    name: Build vLLM CPU Base AMD64
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Validate inputs
+        run: |
+          VLLM_VERSION="${{ inputs.vllm_version }}"
+          
+          if [[ ! "$VLLM_VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "❌ Error: vLLM version must match pattern v*.*.* (e.g., v0.9.2)"
+            echo "Provided: $VLLM_VERSION"
+            exit 1
+          fi
+          
+          echo "✓ Valid vLLM version: $VLLM_VERSION"
+          echo "vllm_version=$VLLM_VERSION" >> $GITHUB_ENV
+
+      - name: Checkout vLLM repository
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ inputs.vllm_version }}
+          fetch-depth: 1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        if: ${{ inputs.push_to_dockerhub }}
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Check if image already exists on Docker Hub
+        id: check_image
+        if: ${{ inputs.push_to_dockerhub }}
+        run: |
+          IMAGE_TAG="${{ env.DOCKERHUB_USERNAME }}/vllm-cpu-base-amd64:${{ inputs.vllm_version }}"
+          
+          echo "Checking if image exists: $IMAGE_TAG"
+          
+          # Try to pull the manifest (without downloading the image)
+          if docker buildx imagetools inspect "$IMAGE_TAG" > /dev/null 2>&1; then
+            echo "⚠️  Warning: Image already exists on Docker Hub: $IMAGE_TAG"
+            echo "image_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "✓ Image does not exist, proceeding with build"
+            echo "image_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build vLLM CPU base image (AMD64)
+        if: ${{ steps.check_image.outputs.image_exists != 'true' || !inputs.push_to_dockerhub }}
+        run: |
+          set -euo pipefail
+          
+          VLLM_VERSION="${{ inputs.vllm_version }}"
+          IMAGE_TAG="${{ env.DOCKERHUB_USERNAME }}/vllm-cpu-base-amd64:${VLLM_VERSION}"
+          
+          echo "========================================="
+          echo "Building vLLM CPU Base Image (AMD64)"
+          echo "========================================="
+          echo "vLLM Version: $VLLM_VERSION"
+          echo "Image Tag: $IMAGE_TAG"
+          echo "Push to Docker Hub: ${{ inputs.push_to_dockerhub }}"
+          echo "========================================="
+          echo ""
+          
+          # Use official vLLM CPU build command with AVX512 optimization flags
+          # Configuration: Maximum compatibility (basic AVX512 only, no BF16/VNNI)
+          docker build \
+            -f docker/Dockerfile.cpu \
+            --build-arg VLLM_CPU_AVX512BF16=false \
+            --build-arg VLLM_CPU_AVX512VNNI=false \
+            --build-arg VLLM_CPU_DISABLE_AVX512=false \
+            --target vllm-openai \
+            --tag "$IMAGE_TAG" \
+            .
+          
+          echo ""
+          echo "✅ Build Complete!"
+          echo "========================================="
+          echo "Image: $IMAGE_TAG"
+          echo "Platform: linux/amd64"
+          echo "========================================="
+
+      - name: Push to Docker Hub
+        if: ${{ inputs.push_to_dockerhub && steps.check_image.outputs.image_exists != 'true' }}
+        run: |
+          IMAGE_TAG="${{ env.DOCKERHUB_USERNAME }}/vllm-cpu-base-amd64:${{ inputs.vllm_version }}"
+          
+          echo "Pushing to Docker Hub..."
+          docker push "$IMAGE_TAG"
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Error: Docker push failed"
+            exit 1
+          fi
+          
+          echo ""
+          echo "✅ Push Complete!"
+          echo "========================================="
+          echo "Image successfully pushed to Docker Hub:"
+          echo "  $IMAGE_TAG"
+          echo ""
+          echo "You can now use this image in your workflows:"
+          echo "  docker pull $IMAGE_TAG"
+          echo "========================================="
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "## vLLM CPU Base Image Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **vLLM Version**: ${{ inputs.vllm_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image Tag**: ${{ env.DOCKERHUB_USERNAME }}/vllm-cpu-base-amd64:${{ inputs.vllm_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Platform**: linux/amd64" >> $GITHUB_STEP_SUMMARY
+          echo "- **Pushed to Docker Hub**: ${{ inputs.push_to_dockerhub }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### AVX512 Configuration" >> $GITHUB_STEP_SUMMARY
+          echo "- **AVX512 Basic**: ✅ Enabled (maximum compatibility)" >> $GITHUB_STEP_SUMMARY
+          echo "- **AVX512-BF16**: ❌ Disabled (compatible with 2017+ CPUs)" >> $GITHUB_STEP_SUMMARY
+          echo "- **AVX512-VNNI**: ❌ Disabled (compatible with 2017+ CPUs)" >> $GITHUB_STEP_SUMMARY
+
