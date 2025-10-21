@@ -468,9 +468,9 @@ jobs:
           BUILD_MODE="${{ steps.trigger.outputs.build_mode }}"
           
           # Convert versions to PEP 440 format
-          VLLM_VERSION_TAG=$(echo "$VLLM_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/-rc/g')
-          VLLM_BUILD_VERSION_TAG=$(echo "$VLLM_BUILD_VERSION" | sed 's/-rc\./rc/g')
-          CT_VERSION_TAG=$(echo "$CT_VERSION" | sed 's/-rc\./rc/g')
+          VLLM_VERSION_TAG=$(echo "$VLLM_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
+          VLLM_BUILD_VERSION_TAG=$(echo "$VLLM_BUILD_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
+          CT_VERSION_TAG=$(echo "$CT_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
 
           PRIMARY_TAG="vllm-${VLLM_VERSION_TAG}_build-${VLLM_BUILD_VERSION_TAG}_crypto-${CT_VERSION_TAG}"
           AMD="${{ env.GHCR_IMAGE_REPO }}:${PRIMARY_TAG}-amd64"
@@ -700,9 +700,9 @@ jobs:
           CT_VERSION='${{ needs.build-and-measure.outputs.ct_version_full }}'
           
           # Convert versions to PEP 440 format
-          VLLM_VERSION_TAG=$(echo "$VLLM_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/-rc/g')
-          VLLM_BUILD_VERSION_TAG=$(echo "$VLLM_BUILD_VERSION" | sed 's/-rc\./rc/g')
-          CT_VERSION_TAG=$(echo "$CT_VERSION" | sed 's/-rc\./rc/g')
+          VLLM_VERSION_TAG=$(echo "$VLLM_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
+          VLLM_BUILD_VERSION_TAG=$(echo "$VLLM_BUILD_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
+          CT_VERSION_TAG=$(echo "$CT_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
 
           PRIMARY_TAG="vllm-${VLLM_VERSION_TAG}_build-${VLLM_BUILD_VERSION_TAG}_crypto-${CT_VERSION_TAG}"
           SRC="${{ env.GHCR_IMAGE_REPO }}:${PRIMARY_TAG}"
@@ -724,9 +724,9 @@ jobs:
           CT_VERSION='${{ needs.build-and-measure.outputs.ct_version_full }}'
           
           # Convert versions to PEP 440 format
-          VLLM_VERSION_TAG=$(echo "$VLLM_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/-rc/g')
-          VLLM_BUILD_VERSION_TAG=$(echo "$VLLM_BUILD_VERSION" | sed 's/-rc\./rc/g')
-          CT_VERSION_TAG=$(echo "$CT_VERSION" | sed 's/-rc\./rc/g')
+          VLLM_VERSION_TAG=$(echo "$VLLM_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
+          VLLM_BUILD_VERSION_TAG=$(echo "$VLLM_BUILD_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
+          CT_VERSION_TAG=$(echo "$CT_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
 
           PRIMARY_TAG="vllm-${VLLM_VERSION_TAG}_build-${VLLM_BUILD_VERSION_TAG}_crypto-${CT_VERSION_TAG}"
           SRC="${{ env.DOCKERHUB_IMAGE_REPO }}:${PRIMARY_TAG}"
