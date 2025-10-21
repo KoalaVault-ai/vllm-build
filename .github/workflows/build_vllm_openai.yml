@@ -11,6 +11,15 @@ on:
         description: "vLLM version (e.g., v0.9.2), leave empty to use vllm_versions file"
         required: false
         type: string
+      architecture:
+        description: "Architecture to build"
+        required: false
+        default: "both"
+        type: choice
+        options:
+          - both
+          - amd64
+          - arm64
       register_baseline:
         description: "Register baseline to API"
         required: false
@@ -26,8 +35,43 @@ env:
   DOCKERHUB_IMAGE_REPO: ${{ vars.DOCKERHUB_USERNAME }}/vllm-openai
 
 jobs:
+  prepare:
+    name: Prepare Build Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      architecture_choice: ${{ steps.set-matrix.outputs.architecture_choice }}
+    steps:
+      - name: Determine build matrix based on architecture selection
+        id: set-matrix
+        run: |
+          ARCH_CHOICE="${{ github.event.inputs.architecture }}"
+          
+          # Tag push always builds both
+          if [ "${{ github.event_name }}" = "push" ]; then
+            ARCH_CHOICE="both"
+          elif [ -z "$ARCH_CHOICE" ]; then
+            ARCH_CHOICE="both"
+          fi
+          
+          echo "architecture_choice=$ARCH_CHOICE" >> "$GITHUB_OUTPUT"
+          echo "Selected architecture: $ARCH_CHOICE"
+          
+          # Generate matrix JSON
+          if [ "$ARCH_CHOICE" = "amd64" ]; then
+            echo 'matrix={"arch":["x86"]}' >> "$GITHUB_OUTPUT"
+            echo "Building: amd64 only"
+          elif [ "$ARCH_CHOICE" = "arm64" ]; then
+            echo 'matrix={"arch":["aarch64"]}' >> "$GITHUB_OUTPUT"
+            echo "Building: arm64 only"
+          else
+            echo 'matrix={"arch":["x86","aarch64"]}' >> "$GITHUB_OUTPUT"
+            echo "Building: both amd64 and arm64"
+          fi
+
   build-and-measure:
     name: Build vLLM OpenAI (${{ matrix.arch }})
+    needs: prepare
     runs-on: ubuntu-latest
     outputs:
       build_mode: ${{ steps.trigger.outputs.build_mode }}
@@ -36,9 +80,9 @@ jobs:
       vllm_build_version_full: ${{ steps.vllm_build_ver.outputs.vllm_build_version_full }}
       ct_version_full: ${{ steps.ct_tag.outputs.ct_version_full }}
       ct_version_wheel: ${{ steps.ct_tag.outputs.ct_version_wheel }}
+      architecture_choice: ${{ needs.prepare.outputs.architecture_choice }}
     strategy:
-      matrix:
-        arch: [x86, aarch64]
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     steps:
       - name: Determine trigger mode
         id: trigger
@@ -621,8 +665,10 @@ jobs:
 
   create-manifests:
     name: Create Multi-Arch Manifests
-    needs: build-and-measure
-    if: ${{ needs.build-and-measure.outputs.dryrun != 'true' }}
+    needs: [prepare, build-and-measure]
+    if: |
+      needs.build-and-measure.outputs.dryrun != 'true' && 
+      needs.prepare.outputs.architecture_choice == 'both'
     runs-on: ubuntu-latest
     outputs:
       primary_tag: ${{ steps.create_manifest.outputs.primary_tag }}
@@ -651,12 +697,54 @@ jobs:
           PRIMARY_TAG="vllm-${VLLM_VERSION_TAG}_build-${VLLM_BUILD_VERSION_TAG}_crypto-${CT_VERSION_TAG}"
           echo "primary_tag=$PRIMARY_TAG" >> "$GITHUB_OUTPUT"
           
+          AMD_IMAGE="${{ env.GHCR_IMAGE_REPO }}:${PRIMARY_TAG}-amd64"
+          ARM_IMAGE="${{ env.GHCR_IMAGE_REPO }}:${PRIMARY_TAG}-arm64"
+          
+          # Wait for both AMD64 and ARM64 images to be available
+          echo "Waiting for both AMD64 and ARM64 images to be available..."
+          MAX_RETRIES=30
+          RETRY_DELAY=20
+          
+          for i in $(seq 1 $MAX_RETRIES); do
+            echo "Attempt $i/$MAX_RETRIES: Checking image availability..."
+            
+            AMD_EXISTS=false
+            ARM_EXISTS=false
+            
+            if docker buildx imagetools inspect "${AMD_IMAGE}" > /dev/null 2>&1; then
+              echo "✓ AMD64 image found: ${AMD_IMAGE}"
+              AMD_EXISTS=true
+            else
+              echo "✗ AMD64 image not yet available: ${AMD_IMAGE}"
+            fi
+            
+            if docker buildx imagetools inspect "${ARM_IMAGE}" > /dev/null 2>&1; then
+              echo "✓ ARM64 image found: ${ARM_IMAGE}"
+              ARM_EXISTS=true
+            else
+              echo "✗ ARM64 image not yet available: ${ARM_IMAGE}"
+            fi
+            
+            if [ "$AMD_EXISTS" = true ] && [ "$ARM_EXISTS" = true ]; then
+              echo "Both images are available!"
+              break
+            fi
+            
+            if [ $i -eq $MAX_RETRIES ]; then
+              echo "Error: Timeout waiting for images to be available"
+              exit 1
+            fi
+            
+            echo "Waiting ${RETRY_DELAY} seconds before retry..."
+            sleep $RETRY_DELAY
+          done
+          
           # Create multi-arch manifest combining amd64 and arm64
           echo "Creating GHCR manifest: ${{ env.GHCR_IMAGE_REPO }}:${PRIMARY_TAG}"
           docker buildx imagetools create \
             --tag "${{ env.GHCR_IMAGE_REPO }}:${PRIMARY_TAG}" \
-            "${{ env.GHCR_IMAGE_REPO }}:${PRIMARY_TAG}-amd64" \
-            "${{ env.GHCR_IMAGE_REPO }}:${PRIMARY_TAG}-arm64"
+            "${AMD_IMAGE}" \
+            "${ARM_IMAGE}"
           
           echo "✓ Multi-arch manifest created for primary tag"
           
@@ -671,8 +759,10 @@ jobs:
 
   publish-dockerhub:
     name: Publish to Docker Hub (mirror GHCR digest)
-    needs: [build-and-measure, create-manifests]
-    if: ${{ needs.build-and-measure.outputs.build_mode == 'release' }}
+    needs: [prepare, build-and-measure, create-manifests]
+    if: |
+      needs.build-and-measure.outputs.build_mode == 'release' && 
+      needs.prepare.outputs.architecture_choice == 'both'
     runs-on: ubuntu-latest
     steps:
       - name: Set up Docker Buildx
