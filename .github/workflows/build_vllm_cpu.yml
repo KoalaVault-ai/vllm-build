@@ -491,6 +491,16 @@ jobs:
             echo "RC mode: skip aliases"
           fi
 
+      - name: Clean up Docker resources before measurement
+        if: ${{ steps.trigger.outputs.dryrun != 'true' }}
+        run: |
+          echo "Cleaning up Docker resources to free disk space..."
+          # Remove dangling images and build cache
+          docker image prune -f
+          docker builder prune -f --filter until=1h
+          # Show disk space after cleanup
+          df -h
+
       - name: Download hash-builder
         working-directory: vllm-build
         env:

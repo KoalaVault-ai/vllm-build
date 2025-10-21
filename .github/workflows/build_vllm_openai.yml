@@ -441,6 +441,16 @@ jobs:
           echo "CryptoTensors Version: ${{ steps.meta.outputs.ct_version_full }}"
           echo "Framework Version: ${{ steps.meta.outputs.framework_version }}"
 
+      - name: Clean up Docker resources before measurement
+        if: ${{ steps.trigger.outputs.dryrun != 'true' }}
+        run: |
+          echo "Cleaning up Docker resources to free disk space..."
+          # Remove dangling images and build cache
+          docker image prune -f
+          docker builder prune -f --filter until=1h
+          # Show disk space after cleanup
+          df -h
+
       - name: Download hash-builder binary
         env:
           GH_TOKEN: ${{ secrets.KOALAVAULT_TOKEN }}
