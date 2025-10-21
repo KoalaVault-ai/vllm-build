@@ -69,7 +69,7 @@ jobs:
             echo "Building: both amd64 and arm64"
           fi
 
-  build-and-measure:
+  build-and-push:
     name: Build vLLM OpenAI (${{ matrix.arch }})
     needs: prepare
     runs-on: ubuntu-latest
@@ -81,6 +81,8 @@ jobs:
       ct_version_full: ${{ steps.ct_tag.outputs.ct_version_full }}
       ct_version_wheel: ${{ steps.ct_tag.outputs.ct_version_wheel }}
       architecture_choice: ${{ needs.prepare.outputs.architecture_choice }}
+      image_ref: ${{ steps.build.outputs.image_ref }}
+      register_baseline: ${{ steps.trigger.outputs.register_baseline }}
     strategy:
       matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
     steps:
@@ -380,6 +382,27 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Pre-pull cleanup to maximize space
+        run: |
+          echo "=== Disk space before cleanup ==="
+          df -h
+          docker system df
+          
+          # Remove all stopped containers
+          docker container prune -f
+          # Remove all unused images
+          docker image prune -a -f
+          # Remove all unused networks
+          docker network prune -f
+          # Remove all build cache
+          docker builder prune -a -f
+          # System-level cleanup
+          docker system prune -a -f --volumes
+          
+          echo "=== Disk space after cleanup ==="
+          df -h
+          docker system df
+
       - name: Pull vLLM base image for target architecture
         run: |
           BASE_IMAGE="${{ steps.meta.outputs.base_image }}"
@@ -390,6 +413,14 @@ jobs:
           
           echo "Verifying pulled image architecture:"
           docker image inspect "${BASE_IMAGE}" --format '{{.Architecture}}'
+          
+          # Clean up all images except the just-pulled base image
+          echo "Cleaning up other images to free space..."
+          docker images --format "{{.Repository}}:{{.Tag}}" | grep -v "${BASE_IMAGE}" | xargs -r docker rmi -f || true
+          docker system prune -a -f
+          
+          echo "Disk space after base image pull and cleanup:"
+          df -h
 
       - name: Build application image to GHCR
         id: build
@@ -485,14 +516,93 @@ jobs:
           echo "CryptoTensors Version: ${{ steps.meta.outputs.ct_version_full }}"
           echo "Framework Version: ${{ steps.meta.outputs.framework_version }}"
 
-      - name: Clean up Docker resources before measurement
+      - name: Aggressive cleanup after build
         if: ${{ steps.trigger.outputs.dryrun != 'true' }}
         run: |
-          echo "Cleaning up Docker resources to free disk space..."
-          # Remove dangling images and build cache
+          echo "=== Aggressive cleanup after build ==="
+          
+          # Keep reference to just-built image
+          BUILT_IMAGE="${{ steps.build.outputs.image_ref }}"
+          BASE_IMAGE="${{ steps.meta.outputs.base_image }}"
+          
+          # Remove base image (no longer needed)
+          echo "Removing base image: ${BASE_IMAGE}"
+          docker rmi "${BASE_IMAGE}" -f || true
+          
+          # Image pushed to registry, safe to remove local copy
+          echo "Image pushed to registry, removing local copy to save space"
+          docker rmi "${BUILT_IMAGE}" -f || true
+          
+          # Remove all dangling images
           docker image prune -f
-          docker builder prune -f --filter until=1h
-          # Show disk space after cleanup
+          
+          # Remove build cache
+          docker builder prune -a -f
+          
+          # System-level cleanup
+          docker system prune -a -f --volumes
+          
+          echo "=== Disk space after aggressive cleanup ==="
+          df -h
+          docker system df
+
+  measure-baseline:
+    name: Measure Baseline (${{ matrix.arch }})
+    needs: [prepare, build-and-push]
+    if: ${{ needs.build-and-push.outputs.dryrun != 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine image reference
+        id: image_info
+        run: |
+          VLLM_VERSION='${{ needs.build-and-push.outputs.vllm_version }}'
+          VLLM_BUILD_VERSION='${{ needs.build-and-push.outputs.vllm_build_version_full }}'
+          CT_VERSION='${{ needs.build-and-push.outputs.ct_version_full }}'
+          
+          # Convert versions to PEP 440 format
+          VLLM_VERSION_TAG=$(echo "$VLLM_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
+          VLLM_BUILD_VERSION_TAG=$(echo "$VLLM_BUILD_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
+          CT_VERSION_TAG=$(echo "$CT_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
+          
+          PRIMARY_TAG="vllm-${VLLM_VERSION_TAG}_build-${VLLM_BUILD_VERSION_TAG}_crypto-${CT_VERSION_TAG}"
+          
+          # Determine architecture suffix
+          ARCH="${{ matrix.arch }}"
+          if [ "$ARCH" = "x86" ]; then
+            ARCH_SUFFIX="amd64"
+          else
+            ARCH_SUFFIX="arm64"
+          fi
+          
+          IMAGE_REF="${{ env.GHCR_IMAGE_REPO }}:${PRIMARY_TAG}-${ARCH_SUFFIX}"
+          echo "image_ref=${IMAGE_REF}" >> "$GITHUB_OUTPUT"
+          echo "Image to measure: ${IMAGE_REF}"
+
+      - name: Pull built image for measurement
+        run: |
+          IMAGE_REF="${{ steps.image_info.outputs.image_ref }}"
+          echo "Pulling built image: ${IMAGE_REF}"
+          docker pull "${IMAGE_REF}"
+          
+          echo "Verifying image:"
+          docker image inspect "${IMAGE_REF}" --format '{{.Architecture}}'
           df -h
 
       - name: Download hash-builder binary
@@ -500,9 +610,6 @@ jobs:
           GH_TOKEN: ${{ secrets.KOALAVAULT_TOKEN }}
         run: |
           echo "Downloading hash-builder"
-          
-          # Clean up any existing hash-builder files
-          rm -f hash-builder* 2>/dev/null || true
           
           # Map architecture to binary architecture
           ARCH="${{ matrix.arch }}"
@@ -517,26 +624,23 @@ jobs:
             exit 1
           fi
           
-          # Get CryptoTensors version and tag for hash-builder
-          CT_TAG="${{ steps.ct_tag.outputs.cryptotensors_tag }}"
-          CT_VERSION_FULL="${{ steps.ct_tag.outputs.ct_version_full }}"
-          
-          # Remove 'v' prefix from version for hash-builder filename
-          # Format: hash-builder-{VERSION}-linux-{ARCH}-{LIBC}
-          # Examples:
-          #   RC: hash-builder-0.1.0-rc.1-linux-x86_64-gnu
-          #   Release: hash-builder-0.1.0-linux-x86_64-gnu
+          CT_VERSION_FULL="${{ needs.build-and-push.outputs.ct_version_full }}"
           HB_VERSION="${CT_VERSION_FULL#v}"
           HB_FILENAME="hash-builder-${HB_VERSION}-linux-${BINARY_ARCH}-${LIBC}"
+          
+          # Get cryptotensors tag
+          BUILD_MODE="${{ needs.build-and-push.outputs.build_mode }}"
+          if [ "$BUILD_MODE" = "rc" ]; then
+            CT_TAG=$(gh release view --repo KoalaVault-ai/cryptotensors --json tagName -q .tagName)
+          else
+            CT_TAG=$(gh release list --repo KoalaVault-ai/cryptotensors --limit 50 | grep -v 'rc\.' | head -1 | awk '{print $1}')
+          fi
           
           echo "Downloading hash-builder: $HB_FILENAME from $CT_TAG"
           gh release download "$CT_TAG" --repo KoalaVault-ai/cryptotensors --pattern "$HB_FILENAME"
           
-          # Rename to standard name
           mv "$HB_FILENAME" hash-builder
           chmod +x hash-builder
-          
-          echo "Hash-builder downloaded:"
           ls -lh hash-builder
           ./hash-builder --version || echo "Hash-builder ready"
 
@@ -545,13 +649,13 @@ jobs:
         run: |
           set -euo pipefail
           
-          echo "Building measurement image with BuildKit export"
-          echo "Base image: ${{ steps.build.outputs.image_ref }}"
+          IMAGE_REF="${{ steps.image_info.outputs.image_ref }}"
+          echo "Building measurement image for: ${IMAGE_REF}"
           mkdir -p ./measurements
           
           docker buildx build \
             -f Dockerfile.measure \
-            --build-arg BASE_IMAGE="${{ steps.build.outputs.image_ref }}" \
+            --build-arg BASE_IMAGE="${IMAGE_REF}" \
             --target export \
             --output type=local,dest=./measurements \
             .
@@ -564,38 +668,43 @@ jobs:
             exit 1
           fi
           
-          MEAS_HASH="$(cat ./measurements/baseline_hash.txt | tr -d '\n')"
-          if [[ -z "$MEAS_HASH" ]]; then
-            echo "::error::measurement_hash is empty in baseline_hash.txt"
+          BASELINE_HASH="$(cat ./measurements/baseline_hash.txt | tr -d '\n')"
+          if [[ -z "$BASELINE_HASH" ]]; then
+            echo "::error::baseline_hash is empty in baseline_hash.txt"
             exit 1
           fi
           
-          echo "measurement_hash=$MEAS_HASH" >> "$GITHUB_OUTPUT"
-          echo "Measurement hash: $MEAS_HASH"
+          echo "baseline_hash=${BASELINE_HASH}" >> "$GITHUB_OUTPUT"
+          echo "✓ Baseline hash extracted: ${BASELINE_HASH}"
 
-      - name: Print baseline information
+      - name: Build framework version string
+        id: framework_info
         run: |
-          echo "✓ Baseline Measured Successfully"
-          echo "=== Baseline Information ==="
-          echo "Framework Version: ${{ steps.meta.outputs.framework_version }}"
-          echo "Measurement Hash: ${{ steps.measure.outputs.measurement_hash }}"
-          echo "Framework Type: vllm"
-          echo "Image: ${{ steps.build.outputs.image_ref }}"
-          echo "================================"
+          VLLM_VERSION="${{ needs.build-and-push.outputs.vllm_version }}"
+          VLLM_BUILD_VERSION="${{ needs.build-and-push.outputs.vllm_build_version_full }}"
+          CT_VERSION="${{ needs.build-and-push.outputs.ct_version_full }}"
+          ARCH="${{ matrix.arch }}"
+          
+          # Build framework version string matching the build job
+          FRAMEWORK_VERSION="vllm-${VLLM_VERSION}-${ARCH}-cuda-linux-build-${VLLM_BUILD_VERSION}-cryptotensors-${CT_VERSION}"
+          echo "framework_version=${FRAMEWORK_VERSION}" >> "$GITHUB_OUTPUT"
+          
+          BUILD_DATE=$(date -u +"%Y-%m-%d")
+          echo "build_date=${BUILD_DATE}" >> "$GITHUB_OUTPUT"
 
       - name: Register baseline to API
-        if: ${{ steps.trigger.outputs.register_baseline == 'true' && vars.KOALAVAULT_API_BASE_URL != '' }}
+        if: ${{ needs.build-and-push.outputs.register_baseline == 'true' && vars.KOALAVAULT_API_BASE_URL != '' }}
         run: |
           set -euo pipefail
           
           echo "[info] Registering baseline to API..."
           
-          BASELINE_HASH="${{ steps.measure.outputs.measurement_hash }}"
-          FRAMEWORK_VERSION="${{ steps.meta.outputs.framework_version }}"
-          VLLM_VERSION="${{ steps.meta.outputs.vllm_version }}"
-          VLLM_BUILD_VERSION="${{ steps.meta.outputs.vllm_build_version_full }}"
-          CRYPTOTENSORS_VERSION="${{ steps.meta.outputs.ct_version_full }}"
-          BUILD_DATE="${{ steps.meta.outputs.build_date }}"
+          BASELINE_HASH="${{ steps.measure.outputs.baseline_hash }}"
+          FRAMEWORK_VERSION="${{ steps.framework_info.outputs.framework_version }}"
+          VLLM_VERSION="${{ needs.build-and-push.outputs.vllm_version }}"
+          VLLM_BUILD_VERSION="${{ needs.build-and-push.outputs.vllm_build_version_full }}"
+          CRYPTOTENSORS_VERSION="${{ needs.build-and-push.outputs.ct_version_full }}"
+          BUILD_DATE="${{ steps.framework_info.outputs.build_date }}"
           
           # Build version.json as a JSON string for description field
           VERSION_JSON_STR=$(jq -n \
@@ -663,11 +772,21 @@ jobs:
             exit 1
           fi
 
+      - name: Print baseline summary
+        run: |
+          echo "=========================================="
+          echo "Baseline Measurement Complete"
+          echo "=========================================="
+          echo "Framework Version: ${{ steps.framework_info.outputs.framework_version }}"
+          echo "Baseline Hash: ${{ steps.measure.outputs.baseline_hash }}"
+          echo "Image: ${{ steps.image_info.outputs.image_ref }}"
+          echo "=========================================="
+
   create-manifests:
     name: Create Multi-Arch Manifests
-    needs: [prepare, build-and-measure]
+    needs: [prepare, build-and-push]
     if: |
-      needs.build-and-measure.outputs.dryrun != 'true' && 
+      needs.build-and-push.outputs.dryrun != 'true' && 
       needs.prepare.outputs.architecture_choice == 'both'
     runs-on: ubuntu-latest
     outputs:
@@ -684,10 +803,10 @@ jobs:
         id: create_manifest
         run: |
           set -euo pipefail
-          VLLM_VERSION='${{ needs.build-and-measure.outputs.vllm_version }}'
-          VLLM_BUILD_VERSION='${{ needs.build-and-measure.outputs.vllm_build_version_full }}'
-          CT_VERSION='${{ needs.build-and-measure.outputs.ct_version_full }}'
-          BUILD_MODE='${{ needs.build-and-measure.outputs.build_mode }}'
+          VLLM_VERSION='${{ needs.build-and-push.outputs.vllm_version }}'
+          VLLM_BUILD_VERSION='${{ needs.build-and-push.outputs.vllm_build_version_full }}'
+          CT_VERSION='${{ needs.build-and-push.outputs.ct_version_full }}'
+          BUILD_MODE='${{ needs.build-and-push.outputs.build_mode }}'
           
           # Convert versions to PEP 440 format
           VLLM_VERSION_TAG=$(echo "$VLLM_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
@@ -759,9 +878,9 @@ jobs:
 
   publish-dockerhub:
     name: Publish to Docker Hub (mirror GHCR digest)
-    needs: [prepare, build-and-measure, create-manifests]
+    needs: [prepare, build-and-push, create-manifests]
     if: |
-      needs.build-and-measure.outputs.build_mode == 'release' && 
+      needs.build-and-push.outputs.build_mode == 'release' && 
       needs.prepare.outputs.architecture_choice == 'both'
     runs-on: ubuntu-latest
     steps:
@@ -777,7 +896,7 @@ jobs:
       - name: Mirror multi-arch manifest to Docker Hub
         run: |
           set -euo pipefail
-          VLLM_VERSION='${{ needs.build-and-measure.outputs.vllm_version }}'
+          VLLM_VERSION='${{ needs.build-and-push.outputs.vllm_version }}'
           PRIMARY_TAG='${{ needs.create-manifests.outputs.primary_tag }}'
           
           SRC='${{ env.GHCR_IMAGE_REPO }}:'"${PRIMARY_TAG}"
