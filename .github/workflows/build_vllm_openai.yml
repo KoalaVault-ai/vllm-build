@@ -27,14 +27,18 @@ env:
 
 jobs:
   build-and-measure:
-    name: Build, Measure and Register
+    name: Build vLLM OpenAI (${{ matrix.arch }})
     runs-on: ubuntu-latest
     outputs:
       build_mode: ${{ steps.trigger.outputs.build_mode }}
+      dryrun: ${{ steps.trigger.outputs.dryrun }}
       vllm_version: ${{ steps.meta.outputs.vllm_version }}
       vllm_build_version_full: ${{ steps.vllm_build_ver.outputs.vllm_build_version_full }}
       ct_version_full: ${{ steps.ct_tag.outputs.ct_version_full }}
       ct_version_wheel: ${{ steps.ct_tag.outputs.ct_version_wheel }}
+    strategy:
+      matrix:
+        arch: [x86, aarch64]
     steps:
       - name: Determine trigger mode
         id: trigger
@@ -53,19 +57,23 @@ jobs:
               echo "Release tag detected, using release mode"
             fi
             
+            DRYRUN="false"
             REGISTER_BASELINE="true"
           else
             # Manual workflow_dispatch trigger - always RC mode
             BUILD_MODE="rc"
+            DRYRUN="false"
             REGISTER_BASELINE="${{ github.event.inputs.register_baseline }}"
             echo "Manual trigger - using RC mode"
           fi
           
           echo "build_mode=$BUILD_MODE" >> "$GITHUB_OUTPUT"
+          echo "dryrun=$DRYRUN" >> "$GITHUB_OUTPUT"
           echo "register_baseline=$REGISTER_BASELINE" >> "$GITHUB_OUTPUT"
           
           echo "=== Trigger Configuration ==="
           echo "Build Mode: $BUILD_MODE"
+          echo "Dry Run: $DRYRUN"
           echo "Register Baseline: $REGISTER_BASELINE"
       
       - uses: actions/checkout@v4
@@ -188,8 +196,16 @@ jobs:
         run: |
           TAG="${{ steps.ct_tag.outputs.cryptotensors_tag }}"
           
-          # Architecture is fixed to x86_64
-          WHEEL_ARCH="x86_64"
+          # Map architecture to wheel architecture
+          ARCH="${{ matrix.arch }}"
+          if [ "$ARCH" = "x86" ]; then
+            WHEEL_ARCH="x86_64"
+          elif [ "$ARCH" = "aarch64" ]; then
+            WHEEL_ARCH="aarch64"
+          else
+            echo "::error::Unsupported architecture: $ARCH"
+            exit 1
+          fi
           
           echo "Downloading by tag: $TAG for arch: $WHEEL_ARCH"
           
@@ -237,8 +253,20 @@ jobs:
         run: |
           set -euo pipefail
           
-          # Build base image from version input
+          # Build base image from version input and architecture
           VLLM_VERSION="${{ steps.vllm_version.outputs.vllm_version }}"
+          ARCH="${{ matrix.arch }}"
+          
+          # Map architecture to Docker platform
+          if [ "$ARCH" = "x86" ]; then
+            DOCKER_ARCH="amd64"
+          elif [ "$ARCH" = "aarch64" ]; then
+            DOCKER_ARCH="arm64"
+          else
+            DOCKER_ARCH="$ARCH"
+          fi
+          
+          # vLLM official images support both amd64 and arm64
           BASE_IMAGE="vllm/vllm-openai:${VLLM_VERSION}"
           IMAGE_NAME="vllm-openai"
           
@@ -247,8 +275,6 @@ jobs:
           echo "vllm_version=$VLLM_VERSION" >> "$GITHUB_OUTPUT"
           
           PLATFORM_OS="linux"
-          ARCH="x86"
-          DOCKER_ARCH="amd64"
           
           echo "platform_os=$PLATFORM_OS" >> "$GITHUB_OUTPUT"
           echo "arch=$ARCH" >> "$GITHUB_OUTPUT"
@@ -290,9 +316,20 @@ jobs:
           echo "Framework Version: $FRAMEWORK_VERSION"
           echo "Build Date: $BUILD_DATE"
 
-      - uses: docker/setup-buildx-action@v3
+      - name: Set up QEMU for ARM64 emulation
+        if: matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: linux/arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
 
       - name: Login GHCR
+        if: ${{ steps.trigger.outputs.dryrun != 'true' }}
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -314,61 +351,80 @@ jobs:
           VLLM_BUILD_VERSION_TAG=$(echo "$VLLM_BUILD_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
           CT_VERSION_TAG=$(echo "$CT_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
           
+          # Primary tag uses PEP 440 format
           PRIMARY_TAG="vllm-${VLLM_VERSION_TAG}_build-${VLLM_BUILD_VERSION_TAG}_crypto-${CT_VERSION_TAG}"
-          IMAGE_REF_GHCR="${{ env.GHCR_IMAGE_REPO }}:${PRIMARY_TAG}"
+          # Per-arch tag suffix
+          if [ "${{ steps.meta.outputs.docker_arch }}" = "amd64" ]; then
+            ARCH_SUFFIX="amd64"
+          else
+            ARCH_SUFFIX="arm64"
+          fi
+          IMAGE_REF_GHCR="${{ env.GHCR_IMAGE_REPO }}:${PRIMARY_TAG}-${ARCH_SUFFIX}"
+          DRYRUN="${{ steps.trigger.outputs.dryrun }}"
+          
           echo "image_ref=${IMAGE_REF_GHCR}" >> "$GITHUB_OUTPUT"
 
-          echo "[Stage 1] Building from base image: ${{ steps.meta.outputs.base_image }}"
-          echo "[Stage 1] Target image: ${IMAGE_REF_GHCR}"
-          echo "[Stage 1] Platform: ${PLATFORM}"
-          echo "[Stage 1] Architecture: ${{ steps.meta.outputs.arch }}"
+          echo "Building from base image: ${{ steps.meta.outputs.base_image }}"
+          echo "Target image: ${IMAGE_REF_GHCR}"
+          echo "Platform: ${PLATFORM}"
+          echo "Architecture: ${{ steps.meta.outputs.arch }}"
           
-          docker buildx build \
-            --platform "${PLATFORM}" \
-            --file "${{ env.DOCKERFILE }}" \
-            --build-arg "BASE_IMAGE=${{ steps.meta.outputs.base_image }}" \
-            --build-arg "FRAMEWORK_VERSION=${{ steps.meta.outputs.framework_version }}" \
-            --build-arg "VLLM_VERSION=${{ steps.meta.outputs.vllm_version }}" \
-            --build-arg "VLLM_BUILD_VERSION=${{ steps.vllm_build_ver.outputs.vllm_build_version_full }}" \
-            --build-arg "CRYPTOTENSORS_VERSION=${{ steps.crypto_version.outputs.ct_version_full }}" \
-            --build-arg "BUILD_DATE=${{ steps.meta.outputs.build_date }}" \
-            --label "io.vllm.version=${VLLM_VERSION}" \
-            --label "io.vllm.build=${VLLM_BUILD_VERSION}" \
-            --label "io.cryptotensors.version=${CT_VERSION}" \
-            --label "org.opencontainers.image.version=${PRIMARY_TAG}" \
-            --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
-            --tag "${IMAGE_REF_GHCR}" \
-            --provenance=false \
-            --push \
-            .
-
-      - name: Create GHCR aliases on release
-        if: ${{ steps.trigger.outputs.build_mode == 'release' }}
-        run: |
-          set -euo pipefail
-          VLLM_VERSION='${{ steps.meta.outputs.vllm_version }}'
-          VLLM_BUILD_VERSION='${{ steps.vllm_build_ver.outputs.vllm_build_version_full }}'
-          CT_VERSION='${{ steps.crypto_version.outputs.ct_version_full }}'
+          if [ "$DRYRUN" = "true" ]; then
+            echo "Mode: DRY RUN (build only, no push)"
+            docker buildx build \
+              --builder default \
+              --platform "${PLATFORM}" \
+              --file "${{ env.DOCKERFILE }}" \
+              --build-arg "BASE_IMAGE=${{ steps.meta.outputs.base_image }}" \
+              --build-arg "FRAMEWORK_VERSION=${{ steps.meta.outputs.framework_version }}" \
+              --build-arg "VLLM_VERSION=${{ steps.meta.outputs.vllm_version }}" \
+              --build-arg "VLLM_BUILD_VERSION=${{ steps.vllm_build_ver.outputs.vllm_build_version_full }}" \
+              --build-arg "CRYPTOTENSORS_VERSION=${{ steps.crypto_version.outputs.ct_version_full }}" \
+              --build-arg "BUILD_DATE=${{ steps.meta.outputs.build_date }}" \
+              --label "io.vllm.version=${VLLM_VERSION}" \
+              --label "io.vllm.build=${VLLM_BUILD_VERSION}" \
+              --label "io.cryptotensors.version=${CT_VERSION}" \
+              --label "org.opencontainers.image.version=${PRIMARY_TAG}" \
+              --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+              --tag "${IMAGE_REF_GHCR}" \
+              --provenance=false \
+              --load \
+              .
+          else
+            echo "Mode: RELEASE (build and push)"
+            docker buildx build \
+              --builder default \
+              --platform "${PLATFORM}" \
+              --file "${{ env.DOCKERFILE }}" \
+              --build-arg "BASE_IMAGE=${{ steps.meta.outputs.base_image }}" \
+              --build-arg "FRAMEWORK_VERSION=${{ steps.meta.outputs.framework_version }}" \
+              --build-arg "VLLM_VERSION=${{ steps.meta.outputs.vllm_version }}" \
+              --build-arg "VLLM_BUILD_VERSION=${{ steps.vllm_build_ver.outputs.vllm_build_version_full }}" \
+              --build-arg "CRYPTOTENSORS_VERSION=${{ steps.crypto_version.outputs.ct_version_full }}" \
+              --build-arg "BUILD_DATE=${{ steps.meta.outputs.build_date }}" \
+              --label "io.vllm.version=${VLLM_VERSION}" \
+              --label "io.vllm.build=${VLLM_BUILD_VERSION}" \
+              --label "io.cryptotensors.version=${CT_VERSION}" \
+              --label "org.opencontainers.image.version=${PRIMARY_TAG}" \
+              --label "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+              --tag "${IMAGE_REF_GHCR}" \
+              --provenance=false \
+              --push \
+              .
+          fi
           
-          # Convert versions to PEP 440 format
-          VLLM_VERSION_TAG=$(echo "$VLLM_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/-rc/g')
-          VLLM_BUILD_VERSION_TAG=$(echo "$VLLM_BUILD_VERSION" | sed 's/-rc\./rc/g')
-          CT_VERSION_TAG=$(echo "$CT_VERSION" | sed 's/-rc\./rc/g')
-          
-          PRIMARY_TAG="vllm-${VLLM_VERSION_TAG}_build-${VLLM_BUILD_VERSION_TAG}_crypto-${CT_VERSION_TAG}"
-          SRC_REF='${{ env.GHCR_IMAGE_REPO }}:'"${PRIMARY_TAG}"
-          
-          # User-friendly alias: vLLM version
-          ALIAS='${{ env.GHCR_IMAGE_REPO }}:'"${VLLM_VERSION}"
-          echo "Creating alias: $ALIAS -> $SRC_REF"
-          docker buildx imagetools create --tag "$ALIAS" "$SRC_REF"
+          echo "✓ Image built successfully"
 
       - name: Print build summary
         run: |
-          echo "✓ Build Complete: Application Image Built and Pushed"
+          DRYRUN="${{ steps.trigger.outputs.dryrun }}"
+          if [ "$DRYRUN" = "true" ]; then
+            echo "✓ Build Complete: vLLM OpenAI Image Built (DRY RUN - not pushed)"
+          else
+            echo "✓ Build Complete: vLLM OpenAI Image Built and Pushed to GHCR (per-arch)"
+          fi
           echo "Image: ${{ steps.build.outputs.image_ref }}"
-          echo "Image Name: ${{ steps.meta.outputs.image_name }}"
-          echo "Platform: ${{ steps.meta.outputs.platform_os }}/${{ steps.meta.outputs.arch }}"
+          echo "Platform: ${{ steps.meta.outputs.platform_os }}/${{ steps.meta.outputs.docker_arch }}"
           echo "vLLM Version: ${{ steps.meta.outputs.vllm_version }}"
           echo "vLLM-Build Version: ${{ steps.meta.outputs.vllm_build_version_full }}"
           echo "CryptoTensors Version: ${{ steps.meta.outputs.ct_version_full }}"
@@ -383,36 +439,36 @@ jobs:
           # Clean up any existing hash-builder files
           rm -f hash-builder* 2>/dev/null || true
           
-          # Architecture is fixed to x86_64 for OpenAI (CUDA)
-          BINARY_ARCH="x86_64"
-          LIBC="gnu"
+          # Map architecture to binary architecture
+          ARCH="${{ matrix.arch }}"
+          if [ "$ARCH" = "x86" ]; then
+            BINARY_ARCH="x86_64"
+            LIBC="gnu"
+          elif [ "$ARCH" = "aarch64" ]; then
+            BINARY_ARCH="aarch64"
+            LIBC="musl"
+          else
+            echo "::error::Unsupported architecture: $ARCH"
+            exit 1
+          fi
           
           # Get CryptoTensors version and tag for hash-builder
           CT_TAG="${{ steps.ct_tag.outputs.cryptotensors_tag }}"
           CT_VERSION_FULL="${{ steps.ct_tag.outputs.ct_version_full }}"
           
           # Remove 'v' prefix from version for hash-builder filename
+          # Format: hash-builder-{VERSION}-linux-{ARCH}-{LIBC}
+          # Examples:
+          #   RC: hash-builder-0.1.0-rc.1-linux-x86_64-gnu
+          #   Release: hash-builder-0.1.0-linux-x86_64-gnu
           HB_VERSION="${CT_VERSION_FULL#v}"
-          
-          # Build hash-builder filename based on version format
-          # RC: hash-builder-0.1.0-rc.1-linux-x86_64-gnu
-          # Release: hash-builder-0.1.0-linux-x86_64-gnu
           HB_FILENAME="hash-builder-${HB_VERSION}-linux-${BINARY_ARCH}-${LIBC}"
           
           echo "Downloading hash-builder: $HB_FILENAME from $CT_TAG"
+          gh release download "$CT_TAG" --repo KoalaVault-ai/cryptotensors --pattern "$HB_FILENAME"
           
-          # Try versioned filename first, fallback to non-versioned if not found
-          if gh release download "$CT_TAG" --repo KoalaVault-ai/cryptotensors --pattern "$HB_FILENAME" 2>/dev/null; then
-            echo "Downloaded versioned hash-builder: $HB_FILENAME"
-            mv "$HB_FILENAME" hash-builder
-          else
-            # Fallback: try without version (e.g., hash-builder--linux-x86_64-gnu)
-            HB_FILENAME_FALLBACK="hash-builder--linux-${BINARY_ARCH}-${LIBC}"
-            echo "Versioned file not found, trying: $HB_FILENAME_FALLBACK"
-            gh release download "$CT_TAG" --repo KoalaVault-ai/cryptotensors --pattern "$HB_FILENAME_FALLBACK"
-            mv "$HB_FILENAME_FALLBACK" hash-builder
-          fi
-          
+          # Rename to standard name
+          mv "$HB_FILENAME" hash-builder
           chmod +x hash-builder
           
           echo "Hash-builder downloaded:"
@@ -425,13 +481,12 @@ jobs:
           set -euo pipefail
           
           echo "Building measurement image with BuildKit export"
-          echo "Base image (local): ${{ steps.build.outputs.image_ref_local }}"
+          echo "Base image: ${{ steps.build.outputs.image_ref }}"
           mkdir -p ./measurements
           
-          # Use local image reference to avoid pulling from GHCR
           docker buildx build \
             -f Dockerfile.measure \
-            --build-arg BASE_IMAGE="${{ steps.build.outputs.image_ref_local }}" \
+            --build-arg BASE_IMAGE="${{ steps.build.outputs.image_ref }}" \
             --target export \
             --output type=local,dest=./measurements \
             .
@@ -543,9 +598,59 @@ jobs:
             exit 1
           fi
 
+  create-manifests:
+    name: Create Multi-Arch Manifests
+    needs: build-and-measure
+    if: ${{ needs.build-and-measure.outputs.dryrun != 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      primary_tag: ${{ steps.create_manifest.outputs.primary_tag }}
+    steps:
+      - name: Login GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch manifest for GHCR
+        id: create_manifest
+        run: |
+          set -euo pipefail
+          VLLM_VERSION='${{ needs.build-and-measure.outputs.vllm_version }}'
+          VLLM_BUILD_VERSION='${{ needs.build-and-measure.outputs.vllm_build_version_full }}'
+          CT_VERSION='${{ needs.build-and-measure.outputs.ct_version_full }}'
+          BUILD_MODE='${{ needs.build-and-measure.outputs.build_mode }}'
+          
+          # Convert versions to PEP 440 format
+          VLLM_VERSION_TAG=$(echo "$VLLM_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
+          VLLM_BUILD_VERSION_TAG=$(echo "$VLLM_BUILD_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
+          CT_VERSION_TAG=$(echo "$CT_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/rc/g')
+          
+          PRIMARY_TAG="vllm-${VLLM_VERSION_TAG}_build-${VLLM_BUILD_VERSION_TAG}_crypto-${CT_VERSION_TAG}"
+          echo "primary_tag=$PRIMARY_TAG" >> "$GITHUB_OUTPUT"
+          
+          # Create multi-arch manifest combining amd64 and arm64
+          echo "Creating GHCR manifest: ${{ env.GHCR_IMAGE_REPO }}:${PRIMARY_TAG}"
+          docker buildx imagetools create \
+            --tag "${{ env.GHCR_IMAGE_REPO }}:${PRIMARY_TAG}" \
+            "${{ env.GHCR_IMAGE_REPO }}:${PRIMARY_TAG}-amd64" \
+            "${{ env.GHCR_IMAGE_REPO }}:${PRIMARY_TAG}-arm64"
+          
+          echo "✓ Multi-arch manifest created for primary tag"
+          
+          # For official releases, also create user-friendly alias
+          if [ "$BUILD_MODE" = "release" ]; then
+            echo "Creating user-friendly alias: ${VLLM_VERSION}"
+            docker buildx imagetools create \
+              --tag "${{ env.GHCR_IMAGE_REPO }}:${VLLM_VERSION}" \
+              "${{ env.GHCR_IMAGE_REPO }}:${PRIMARY_TAG}"
+            echo "✓ User-friendly alias created"
+          fi
+
   publish-dockerhub:
     name: Publish to Docker Hub (mirror GHCR digest)
-    needs: build-and-measure
+    needs: [build-and-measure, create-manifests]
     if: ${{ needs.build-and-measure.outputs.build_mode == 'release' }}
     runs-on: ubuntu-latest
     steps:
@@ -558,29 +663,25 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Mirror primary tag to Docker Hub via imagetools and create aliases
+      - name: Mirror multi-arch manifest to Docker Hub
         run: |
           set -euo pipefail
           VLLM_VERSION='${{ needs.build-and-measure.outputs.vllm_version }}'
-          VLLM_BUILD_VERSION='${{ needs.build-and-measure.outputs.vllm_build_version_full }}'
-          CT_VERSION='${{ needs.build-and-measure.outputs.ct_version_full }}'
+          PRIMARY_TAG='${{ needs.create-manifests.outputs.primary_tag }}'
           
-          # Convert versions to PEP 440 format
-          VLLM_VERSION_TAG=$(echo "$VLLM_VERSION" | sed 's/-rc\./-rc/g' | sed 's/-rc/-rc/g')
-          VLLM_BUILD_VERSION_TAG=$(echo "$VLLM_BUILD_VERSION" | sed 's/-rc\./rc/g')
-          CT_VERSION_TAG=$(echo "$CT_VERSION" | sed 's/-rc\./rc/g')
-          
-          PRIMARY_TAG="vllm-${VLLM_VERSION_TAG}_build-${VLLM_BUILD_VERSION_TAG}_crypto-${CT_VERSION_TAG}"
           SRC='${{ env.GHCR_IMAGE_REPO }}:'"${PRIMARY_TAG}"
           DST='${{ env.DOCKERHUB_IMAGE_REPO }}:'"${PRIMARY_TAG}"
-          echo "Mirroring ${SRC} -> ${DST}"
+          
+          echo "Mirroring multi-arch manifest: ${SRC} -> ${DST}"
           if docker buildx imagetools inspect "${DST}" > /dev/null 2>&1; then
             echo "Tag exists on Docker Hub, skipping: ${DST}"
           else
             docker buildx imagetools create --tag "${DST}" "${SRC}"
+            echo "✓ Primary tag mirrored to Docker Hub"
           fi
           
           # User-friendly alias on Docker Hub: vLLM version
           ALIAS='${{ env.DOCKERHUB_IMAGE_REPO }}:'"${VLLM_VERSION}"
-          echo "Creating alias: $ALIAS -> $DST"
+          echo "Creating user-friendly alias: $ALIAS"
           docker buildx imagetools create --tag "$ALIAS" "$DST"
+          echo "✓ User-friendly alias created on Docker Hub"

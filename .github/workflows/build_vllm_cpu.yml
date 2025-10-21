@@ -128,13 +128,6 @@ jobs:
           echo "vllm_tag=$VLLM_TAG" >> "$GITHUB_OUTPUT"
           echo "Final vLLM version: $VLLM_TAG"
 
-      - name: Checkout vLLM repo
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ env.VLLM_REPO }}
-          ref: ${{ steps.vllm_version.outputs.vllm_tag }}
-          path: vllm
-
       - name: Free disk space
         uses: jlumbroso/free-disk-space@main
         with:
@@ -267,11 +260,11 @@ jobs:
           echo "CryptoTensors wheel version: $CRYPTO_VERSION_WHEEL"
           echo "CryptoTensors wheel: $CRYPTO_WHL"
 
-      - name: Copy packages to vLLM build directory
+      - name: Prepare packages for Docker build
         run: |
-          cp vllm-build/*.whl vllm/
-          echo "Copied packages to vLLM directory:"
-          ls -lh vllm/*.whl
+          echo "Packages for Docker build:"
+          ls -lh vllm-build/*.whl
+          ls -lh vllm-build/hash-builder*
 
       - name: Determine build metadata
         id: meta
@@ -327,7 +320,7 @@ jobs:
           echo "Framework Version: $FRAMEWORK_VERSION"
           echo "Build Date: $BUILD_DATE"
 
-      - name: Set up QEMU for ARM64 cross-compilation
+      - name: Set up QEMU for ARM64 emulation (Stage 2/3)
         if: matrix.arch == 'aarch64'
         uses: docker/setup-qemu-action@v3
         with:
@@ -347,45 +340,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build vLLM CPU base image (Stage 1)
+      - name: Pull pre-built vLLM CPU base image (Stage 1)
         id: build_base
-        working-directory: vllm
         run: |
           set -euo pipefail
-          PLATFORM="${{ steps.meta.outputs.platform_os }}/${{ steps.meta.outputs.docker_arch }}"
-          BASE_IMAGE_REF="vllm-cpu-base:${{ steps.meta.outputs.vllm_version }}-${{ steps.meta.outputs.arch }}"
           ARCH="${{ steps.meta.outputs.arch }}"
+          VLLM_VERSION="${{ steps.meta.outputs.vllm_version }}"
           
-          echo "base_image_ref=${BASE_IMAGE_REF}" >> "$GITHUB_OUTPUT"
-
-          # Stage 1: Build pure vLLM CPU image from source (no cryptotensors yet)
-          echo "[Stage 1] Building pure vLLM CPU from source: ${{ steps.vllm_version.outputs.vllm_tag }}"
-          echo "[Stage 1] Intermediate image: ${BASE_IMAGE_REF}"
-          echo "[Stage 1] Platform: ${PLATFORM}"
-          echo "[Stage 1] Architecture: ${ARCH}"
-          
-          # Set build arguments based on architecture
-          BUILD_ARGS=""
           if [ "$ARCH" = "aarch64" ]; then
-            echo "[Stage 1] ARM64 build: Adding optimization flags for aarch64"
-            # For ARM64 builds, limit parallel jobs to avoid OOM in GitHub Actions
-            BUILD_ARGS="--build-arg max_jobs=4"
+            # ARM64: Use pre-built base image from Docker Hub (built locally on Mac)
+            BASE_IMAGE_REF="koalavault/vllm-cpu-base-arm64:${VLLM_VERSION}"
+            echo "[Stage 1] ARM64: Using pre-built base image from Docker Hub"
           else
-            echo "[Stage 1] x86_64 build: Using default build settings"
+            # AMD64: Use pre-built base image from Docker Hub (built by GitHub Actions)
+            BASE_IMAGE_REF="koalavault/vllm-cpu-base-amd64:${VLLM_VERSION}"
+            echo "[Stage 1] AMD64: Using pre-built base image from Docker Hub"
           fi
           
-          docker buildx build \
-            --builder default \
-            --platform "${PLATFORM}" \
-            --file docker/Dockerfile.cpu \
-            --target vllm-openai \
-            --tag "${BASE_IMAGE_REF}" \
-            --provenance=false \
-            --load \
-            ${BUILD_ARGS} \
-            .
+          echo "[Stage 1] Image: ${BASE_IMAGE_REF}"
+          echo "[Stage 1] Pulling image..."
+          docker pull "${BASE_IMAGE_REF}"
+          echo "[Stage 1] ✓ Pre-built ${ARCH} base image pulled successfully"
           
-          echo "[Stage 1] ✓ Base vLLM CPU image built successfully"
+          echo "base_image_ref=${BASE_IMAGE_REF}" >> "$GITHUB_OUTPUT"
 
       - name: Build final image with CryptoTensors (Stage 2)
         id: build
@@ -543,27 +520,18 @@ jobs:
           CT_VERSION_FULL="${{ steps.ct_tag.outputs.ct_version_full }}"
           
           # Remove 'v' prefix from version for hash-builder filename
+          # Format: hash-builder-{VERSION}-linux-{ARCH}-{LIBC}
+          # Examples:
+          #   RC: hash-builder-0.1.0-rc.1-linux-x86_64-gnu
+          #   Release: hash-builder-0.1.0-linux-x86_64-gnu
           HB_VERSION="${CT_VERSION_FULL#v}"
-          
-          # Build hash-builder filename based on version format
-          # RC: hash-builder-0.1.0-rc.1-linux-x86_64-gnu
-          # Release: hash-builder-0.1.0-linux-x86_64-gnu
           HB_FILENAME="hash-builder-${HB_VERSION}-linux-${BINARY_ARCH}-${LIBC}"
           
           echo "Downloading hash-builder: $HB_FILENAME from $CT_TAG"
+          gh release download "$CT_TAG" --repo KoalaVault-ai/cryptotensors --pattern "$HB_FILENAME"
           
-          # Try versioned filename first, fallback to non-versioned if not found
-          if gh release download "$CT_TAG" --repo KoalaVault-ai/cryptotensors --pattern "$HB_FILENAME" 2>/dev/null; then
-            echo "Downloaded versioned hash-builder: $HB_FILENAME"
-            mv "$HB_FILENAME" hash-builder
-          else
-            # Fallback: try without version (e.g., hash-builder--linux-x86_64-gnu)
-            HB_FILENAME_FALLBACK="hash-builder--linux-${BINARY_ARCH}-${LIBC}"
-            echo "Versioned file not found, trying: $HB_FILENAME_FALLBACK"
-            gh release download "$CT_TAG" --repo KoalaVault-ai/cryptotensors --pattern "$HB_FILENAME_FALLBACK"
-            mv "$HB_FILENAME_FALLBACK" hash-builder
-          fi
-          
+          # Rename to standard name
+          mv "$HB_FILENAME" hash-builder
           chmod +x hash-builder
           
           echo "Hash-builder downloaded:"
