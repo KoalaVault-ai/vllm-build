@@ -5,6 +5,7 @@ import os
 import sys
 import importlib.util
 import importlib
+import shutil
 
 CANDIDATES = [
     "vllm.entrypoints.openai.api_server",
@@ -96,6 +97,7 @@ def main():
     # - /tmp subdirectories: Must be created because --tmpfs /tmp clears everything
     # - Symlinks: Already created in Dockerfile, no need to touch them
     # - /root/.cache/huggingface: User's responsibility to mount if using --read-only
+    # - flashinfer: Restored from backup
     # 
     # If user needs writable paths with --read-only, they must mount them:
     #   --tmpfs /tmp:exec,nosuid,nodev
@@ -109,6 +111,27 @@ def main():
     os.makedirs("/tmp/kv-vllm", exist_ok=True)
     os.makedirs("/tmp/kv-torch", exist_ok=True)
     os.makedirs("/tmp/kv-flashinfer", exist_ok=True)
+    
+    # Restore flashinfer precompiled kernels from backup
+    # This is critical for performance - without these, vLLM would need to recompile
+    # all CUDA kernels on first run (~5-10 minutes delay)
+    backup_path = "/opt/flashinfer-backup"
+    target_path = "/tmp/kv-flashinfer"
+    
+    if os.path.isdir(backup_path) and os.listdir(backup_path):
+        try:
+            # Copy all files from backup to tmpfs
+            # Using copytree with dirs_exist_ok=True for robustness
+            for item in os.listdir(backup_path):
+                src = os.path.join(backup_path, item)
+                dst = os.path.join(target_path, item)
+                if os.path.isdir(src):
+                    shutil.copytree(src, dst, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(src, dst)
+            print(f"[koalavault] Restored flashinfer cache from backup ({backup_path} -> {target_path})", flush=True)
+        except Exception as e:
+            print(f"[koalavault] Warn: Failed to restore flashinfer cache from backup: {e}", flush=True)
     
     argv = sys.argv[1:]
     crypto_args, vllm_args = split_args(argv)
