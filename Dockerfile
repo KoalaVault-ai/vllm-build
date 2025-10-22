@@ -47,13 +47,21 @@ COPY boot.py /opt/venv/lib/python3.12/site-packages/boot.py
 #   - /tmp subdirectories will be recreated by boot.py (tmpfs mount clears them)
 #   - Symlinks are created here for efficiency (boot.py will verify/fix if needed)
 #   - /root/.cache/huggingface is a real directory (not symlink) for flexible mounting
-RUN mkdir -p /root/.cache/huggingface && \
+RUN set -e; \
+    mkdir -p /root/.cache/huggingface && \
+    mkdir -p /root/.cache && \
     mkdir -p /tmp && \
     ln -s /tmp/kv-triton /root/.triton && \
     ln -s /tmp/kv-config /root/.config && \
     ln -s /tmp/kv-vllm /root/.cache/vllm && \
     ln -s /tmp/kv-torch /root/.cache/torch && \
-    ln -s /tmp/kv-flashinfer /root/.cache/flashinfer
+    ln -s /tmp/kv-flashinfer /root/.cache/flashinfer && \
+    # Verify symlinks; fail build on mismatch
+    test -L /root/.triton && [ "$(readlink -f /root/.triton)" = "/tmp/kv-triton" ] && \
+    test -L /root/.config && [ "$(readlink -f /root/.config)" = "/tmp/kv-config" ] && \
+    test -L /root/.cache/vllm && [ "$(readlink -f /root/.cache/vllm)" = "/tmp/kv-vllm" ] && \
+    test -L /root/.cache/torch && [ "$(readlink -f /root/.cache/torch)" = "/tmp/kv-torch" ] && \
+    test -L /root/.cache/flashinfer && [ "$(readlink -f /root/.cache/flashinfer)" = "/tmp/kv-flashinfer" ]
 
 WORKDIR /workspace
 ENTRYPOINT ["/usr/bin/tini", "-g", "--", "python3", "/opt/venv/lib/python3.12/site-packages/boot.py"]
