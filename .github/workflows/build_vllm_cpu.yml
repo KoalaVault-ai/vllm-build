@@ -238,14 +238,21 @@ jobs:
           BUILD_MODE="${{ steps.trigger.outputs.build_mode }}"
           echo "Build mode: $BUILD_MODE"
           
-          if [ "$BUILD_MODE" = "rc" ]; then
-            # RC mode: get latest release (may be RC)
-            echo "RC mode: getting latest release"
-            TAG=$(gh release view --repo KoalaVault-ai/cryptotensors --json tagName -q .tagName)
+          # Get latest release (same method for both RC and release modes)
+          echo "Getting latest CryptoTensors release..."
+          TAG=$(gh release view --repo KoalaVault-ai/cryptotensors --json tagName -q .tagName)
+          echo "Latest release tag: '$TAG'"
+          
+          # For release mode, validate that the tag doesn't contain 'rc'
+          if [ "$BUILD_MODE" = "release" ]; then
+            if [[ "$TAG" == *"rc"* ]]; then
+              echo "::error::Latest release contains 'rc' but we need stable version for release mode: $TAG"
+              echo "Please check if there's a stable CryptoTensors release available."
+              exit 1
+            fi
+            echo "✓ Release mode: Confirmed stable version (no RC): '$TAG'"
           else
-            # Release mode: get latest stable release (exclude RC)
-            echo "Release mode: getting latest stable release"
-            TAG=$(gh release list --repo KoalaVault-ai/cryptotensors --limit 50 | grep -v 'rc\.' | head -1 | awk '{print $1}')
+            echo "✓ RC mode: Using latest release (may contain RC): '$TAG'"
           fi
           
           if [ -z "$TAG" ]; then
@@ -622,6 +629,19 @@ jobs:
           CT_TAG="${{ steps.ct_tag.outputs.cryptotensors_tag }}"
           CT_VERSION_FULL="${{ steps.ct_tag.outputs.ct_version_full }}"
           
+          # Additional validation for release mode (double-check)
+          BUILD_MODE="${{ steps.trigger.outputs.build_mode }}"
+          if [ "$BUILD_MODE" = "release" ]; then
+            if [[ "$CT_TAG" == *"rc"* ]]; then
+              echo "::error::CryptoTensors tag for hash-builder contains 'rc' but we need stable version for release mode: $CT_TAG"
+              echo "This should not happen as the tag was already validated in the previous step."
+              exit 1
+            fi
+            echo "✓ Release mode: Confirmed stable CryptoTensors tag for hash-builder (no RC): '$CT_TAG'"
+          else
+            echo "✓ RC mode: Using CryptoTensors tag for hash-builder (may contain RC): '$CT_TAG'"
+          fi
+          
           # Remove 'v' prefix from version for hash-builder filename
           # Format: hash-builder-{VERSION}-linux-{ARCH}-{LIBC}
           # Examples:
@@ -845,3 +865,9 @@ jobs:
             echo "Alias already exists, updating to point to ${SRC}: $ALIAS"
           fi
           docker buildx imagetools create --tag "$ALIAS" "$SRC"
+          
+          # Latest tag on Docker Hub
+          LATEST_TAG="${{ env.DOCKERHUB_IMAGE_REPO }}:latest"
+          echo "Creating latest tag: $LATEST_TAG"
+          docker buildx imagetools create --tag "$LATEST_TAG" "$SRC"
+          echo "✓ Latest tag created on Docker Hub"
