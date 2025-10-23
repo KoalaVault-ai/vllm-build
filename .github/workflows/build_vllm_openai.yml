@@ -989,8 +989,26 @@ jobs:
       needs.prepare.outputs.architecture_choice == 'both'
     runs-on: ubuntu-latest
     steps:
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Login Docker Hub
         uses: docker/login-action@v3
@@ -998,31 +1016,95 @@ jobs:
           username: ${{ vars.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Mirror multi-arch manifest to Docker Hub
+      - name: Push AMD64 image to Docker Hub
+        run: |
+          set -euo pipefail
+          PRIMARY_TAG='${{ needs.create-manifests.outputs.primary_tag }}'
+          
+          SRC='${{ env.GHCR_IMAGE_REPO }}:'"${PRIMARY_TAG}"
+          DST_AMD64='${{ env.DOCKERHUB_IMAGE_REPO }}:'"${PRIMARY_TAG}-amd64"
+          
+          echo "Pulling and pushing AMD64 image: ${SRC} -> ${DST_AMD64}"
+          
+          # Pull AMD64 image from GHCR
+          docker pull --platform linux/amd64 "${SRC}"
+          
+          # Tag for Docker Hub
+          docker tag "${SRC}" "${DST_AMD64}"
+          
+          # Push to Docker Hub
+          docker push "${DST_AMD64}"
+          echo "✓ AMD64 image pushed to Docker Hub"
+          
+          # Clean up local image to save space
+          docker rmi "${SRC}" "${DST_AMD64}" || true
+
+      - name: Push ARM64 image to Docker Hub
+        run: |
+          set -euo pipefail
+          PRIMARY_TAG='${{ needs.create-manifests.outputs.primary_tag }}'
+          
+          SRC='${{ env.GHCR_IMAGE_REPO }}:'"${PRIMARY_TAG}"
+          DST_ARM64='${{ env.DOCKERHUB_IMAGE_REPO }}:'"${PRIMARY_TAG}-arm64"
+          
+          echo "Pulling and pushing ARM64 image: ${SRC} -> ${DST_ARM64}"
+          
+          # Pull ARM64 image from GHCR
+          docker pull --platform linux/arm64 "${SRC}"
+          
+          # Tag for Docker Hub
+          docker tag "${SRC}" "${DST_ARM64}"
+          
+          # Push to Docker Hub
+          docker push "${DST_ARM64}"
+          echo "✓ ARM64 image pushed to Docker Hub"
+          
+          # Clean up local image to save space
+          docker rmi "${SRC}" "${DST_ARM64}" || true
+
+      - name: Create multi-arch manifest on Docker Hub
+        run: |
+          set -euo pipefail
+          PRIMARY_TAG='${{ needs.create-manifests.outputs.primary_tag }}'
+          
+          DST='${{ env.DOCKERHUB_IMAGE_REPO }}:'"${PRIMARY_TAG}"
+          DST_AMD64='${{ env.DOCKERHUB_IMAGE_REPO }}:'"${PRIMARY_TAG}-amd64"
+          DST_ARM64='${{ env.DOCKERHUB_IMAGE_REPO }}:'"${PRIMARY_TAG}-arm64"
+          
+          echo "Creating multi-arch manifest: ${DST}"
+          
+          # Check if manifest already exists
+          if docker buildx imagetools inspect "${DST}" > /dev/null 2>&1; then
+            echo "Manifest already exists on Docker Hub, skipping: ${DST}"
+          else
+            # Create multi-arch manifest
+            docker manifest create "${DST}" \
+              --amend "${DST_AMD64}" \
+              --amend "${DST_ARM64}"
+            
+            # Push manifest
+            docker manifest push "${DST}"
+            echo "✓ Multi-arch manifest created and pushed to Docker Hub"
+          fi
+
+      - name: Create/update Docker Hub aliases
         run: |
           set -euo pipefail
           VLLM_VERSION='${{ needs.build-and-push.outputs.vllm_version }}'
           PRIMARY_TAG='${{ needs.create-manifests.outputs.primary_tag }}'
           
-          SRC='${{ env.GHCR_IMAGE_REPO }}:'"${PRIMARY_TAG}"
-          DST='${{ env.DOCKERHUB_IMAGE_REPO }}:'"${PRIMARY_TAG}"
-          
-          echo "Mirroring multi-arch manifest: ${SRC} -> ${DST}"
-          if docker buildx imagetools inspect "${DST}" > /dev/null 2>&1; then
-            echo "Tag exists on Docker Hub, skipping: ${DST}"
-          else
-            docker buildx imagetools create --tag "${DST}" "${SRC}"
-            echo "✓ Primary tag mirrored to Docker Hub"
-          fi
+          PRIMARY_TAG_DOCKERHUB="${{ env.DOCKERHUB_IMAGE_REPO }}:${PRIMARY_TAG}"
           
           # User-friendly alias on Docker Hub: vLLM version
-          ALIAS='${{ env.DOCKERHUB_IMAGE_REPO }}:'"${VLLM_VERSION}"
-          echo "Creating user-friendly alias: $ALIAS"
-          docker buildx imagetools create --tag "$ALIAS" "$DST"
-          echo "✓ User-friendly alias created on Docker Hub"
+          ALIAS="${{ env.DOCKERHUB_IMAGE_REPO }}:${VLLM_VERSION}"
+          
+          if docker buildx imagetools inspect "$ALIAS" > /dev/null 2>&1; then
+            echo "Alias already exists, updating to point to ${PRIMARY_TAG_DOCKERHUB}: $ALIAS"
+          fi
+          docker buildx imagetools create --tag "$ALIAS" "$PRIMARY_TAG_DOCKERHUB"
           
           # Latest tag on Docker Hub
-          LATEST_TAG='${{ env.DOCKERHUB_IMAGE_REPO }}:latest'
+          LATEST_TAG="${{ env.DOCKERHUB_IMAGE_REPO }}:latest"
           echo "Creating latest tag: $LATEST_TAG"
-          docker buildx imagetools create --tag "$LATEST_TAG" "$DST"
+          docker buildx imagetools create --tag "$LATEST_TAG" "$PRIMARY_TAG_DOCKERHUB"
           echo "✓ Latest tag created on Docker Hub"
