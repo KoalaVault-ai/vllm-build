@@ -227,11 +227,24 @@ jobs:
           GH_TOKEN: ${{ secrets.KOALAVAULT_TOKEN }}
         run: |
           BUILD_MODE="${{ steps.trigger.outputs.build_mode }}"
+          echo "Build mode: $BUILD_MODE"
+          
           if [ "$BUILD_MODE" = "rc" ]; then
+            # RC mode: get latest release (may be RC)
+            echo "RC mode: getting latest release"
             TAG=$(gh release view --repo KoalaVault-ai/cryptotensors --json tagName -q .tagName)
           else
+            # Release mode: get latest stable release (exclude RC)
+            echo "Release mode: getting latest stable release"
             TAG=$(gh release list --repo KoalaVault-ai/cryptotensors --limit 50 | grep -v 'rc\.' | head -1 | awk '{print $1}')
           fi
+          
+          if [ -z "$TAG" ]; then
+            echo "::error::No CryptoTensors release found"
+            exit 1
+          fi
+          
+          echo "Found CryptoTensors tag: $TAG"
           echo "cryptotensors_tag=$TAG" >> "$GITHUB_OUTPUT"
           CT_VER="${TAG#core/}"
           echo "ct_version_full=$CT_VER" >> "$GITHUB_OUTPUT"
@@ -667,11 +680,22 @@ jobs:
           
           # Get cryptotensors tag
           BUILD_MODE="${{ needs.build-and-push.outputs.build_mode }}"
+          echo "Build mode for hash-builder: $BUILD_MODE"
+          
           if [ "$BUILD_MODE" = "rc" ]; then
+            echo "RC mode: getting latest release for hash-builder"
             CT_TAG=$(gh release view --repo KoalaVault-ai/cryptotensors --json tagName -q .tagName)
           else
+            echo "Release mode: getting latest stable release for hash-builder"
             CT_TAG=$(gh release list --repo KoalaVault-ai/cryptotensors --limit 50 | grep -v 'rc\.' | head -1 | awk '{print $1}')
           fi
+          
+          if [ -z "$CT_TAG" ]; then
+            echo "::error::No CryptoTensors release found for hash-builder"
+            exit 1
+          fi
+          
+          echo "Found CryptoTensors tag for hash-builder: $CT_TAG"
           
           echo "Downloading hash-builder: $HB_FILENAME from $CT_TAG"
           gh release download "$CT_TAG" --repo KoalaVault-ai/cryptotensors --pattern "$HB_FILENAME"
