@@ -1,0 +1,143 @@
+name: Cleanup RC Images from GHCR
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_cleanup:
+        description: 'Type "CONFIRM" to proceed with cleanup (this will delete all RC images)'
+        required: true
+        type: string
+      dry_run:
+        description: 'Dry run mode (only list images, do not delete)'
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  GHCR_OPENAI_REPO: ghcr.io/koalavault-ai/vllm-openai
+  GHCR_CPU_REPO: ghcr.io/koalavault-ai/vllm-cpu
+
+jobs:
+  cleanup-rc-images:
+    name: Cleanup RC Images
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm_cleanup }}" != "CONFIRM" ]; then
+            echo "::error::Please type 'CONFIRM' to proceed with cleanup"
+            exit 1
+          fi
+          echo "✓ Confirmation validated"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: List and cleanup vLLM OpenAI RC images
+        run: |
+          echo "=== vLLM OpenAI RC Images Cleanup ==="
+          
+          # Get all tags for vllm-openai repository
+          echo "Fetching all tags for vllm-openai..."
+          TAGS=$(docker buildx imagetools inspect ${{ env.GHCR_OPENAI_REPO }} --raw 2>/dev/null | jq -r '.manifests[].annotations."org.opencontainers.image.ref.name"' 2>/dev/null || echo "")
+          
+          if [ -z "$TAGS" ]; then
+            echo "No tags found or unable to fetch tags for vllm-openai"
+            RC_TAGS=""
+          else
+            echo "All tags found:"
+            echo "$TAGS" | sort
+            echo ""
+            
+            # Filter RC tags
+            RC_TAGS=$(echo "$TAGS" | grep -E 'rc\.|rc[0-9]' || echo "")
+          fi
+          
+          if [ -z "$RC_TAGS" ]; then
+            echo "✓ No RC tags found in vllm-openai repository"
+          else
+            echo "RC tags found in vllm-openai:"
+            echo "$RC_TAGS"
+            echo ""
+            
+            if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+              echo "🔍 DRY RUN MODE: Would delete the following RC tags:"
+              echo "$RC_TAGS"
+            else
+              echo "🗑️  Deleting RC tags from vllm-openai..."
+              for tag in $RC_TAGS; do
+                echo "Deleting: ${{ env.GHCR_OPENAI_REPO }}:$tag"
+                docker buildx imagetools rm "${{ env.GHCR_OPENAI_REPO }}:$tag" || echo "Failed to delete $tag"
+              done
+              echo "✓ RC tags cleanup completed for vllm-openai"
+            fi
+          fi
+
+      - name: List and cleanup vLLM CPU RC images
+        run: |
+          echo "=== vLLM CPU RC Images Cleanup ==="
+          
+          # Get all tags for vllm-cpu repository
+          echo "Fetching all tags for vllm-cpu..."
+          TAGS=$(docker buildx imagetools inspect ${{ env.GHCR_CPU_REPO }} --raw 2>/dev/null | jq -r '.manifests[].annotations."org.opencontainers.image.ref.name"' 2>/dev/null || echo "")
+          
+          if [ -z "$TAGS" ]; then
+            echo "No tags found or unable to fetch tags for vllm-cpu"
+            RC_TAGS=""
+          else
+            echo "All tags found:"
+            echo "$TAGS" | sort
+            echo ""
+            
+            # Filter RC tags
+            RC_TAGS=$(echo "$TAGS" | grep -E 'rc\.|rc[0-9]' || echo "")
+          fi
+          
+          if [ -z "$RC_TAGS" ]; then
+            echo "✓ No RC tags found in vllm-cpu repository"
+          else
+            echo "RC tags found in vllm-cpu:"
+            echo "$RC_TAGS"
+            echo ""
+            
+            if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+              echo "🔍 DRY RUN MODE: Would delete the following RC tags:"
+              echo "$RC_TAGS"
+            else
+              echo "🗑️  Deleting RC tags from vllm-cpu..."
+              for tag in $RC_TAGS; do
+                echo "Deleting: ${{ env.GHCR_CPU_REPO }}:$tag"
+                docker buildx imagetools rm "${{ env.GHCR_CPU_REPO }}:$tag" || echo "Failed to delete $tag"
+              done
+              echo "✓ RC tags cleanup completed for vllm-cpu"
+            fi
+          fi
+
+      - name: Summary
+        run: |
+          echo "=========================================="
+          echo "RC Images Cleanup Summary"
+          echo "=========================================="
+          echo "Repository: ${{ github.repository }}"
+          echo "Actor: ${{ github.actor }}"
+          echo "Dry Run: ${{ github.event.inputs.dry_run }}"
+          echo "Confirmation: ${{ github.event.inputs.confirm_cleanup }}"
+          echo "=========================================="
+          
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            echo "🔍 This was a DRY RUN - no images were actually deleted"
+            echo "To actually delete RC images, run this workflow again with dry_run=false"
+          else
+            echo "✅ RC images cleanup completed"
+          fi
